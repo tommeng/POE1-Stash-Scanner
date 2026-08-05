@@ -184,6 +184,62 @@ def test_a_merely_high_life_roll_does_not_earn_a_market_check(index, ruleset):
     assert not v.promoted
 
 
+# -- resistance bands -------------------------------------------------------
+
+
+def _res_item(fire: int, cold: int, lightning: int, chaos: int = 0):
+    """A ring whose only notable property is its resistance spread."""
+    mods = [
+        f"+{fire}% to Fire Resistance",
+        f"+{cold}% to Cold Resistance",
+        f"+{lightning}% to Lightning Resistance",
+    ]
+    if chaos:
+        mods.append(f"+{chaos}% to Chaos Resistance")
+    return F.item(explicitMods=mods)
+
+
+@pytest.mark.parametrize("spread", [(44, 44, 44), (45, 45, 45), (48, 48, 48)])
+def test_high_total_res_band_excludes_the_top_band(spread, index, ruleset):
+    fired = _rules_for(_res_item(*spread), index, ruleset)
+    assert "huge-total-res" not in fired
+    assert "high-total-res" in fired
+
+
+@pytest.mark.parametrize("spread", [(54, 54, 54), (60, 60, 60)])
+def test_top_res_band_replaces_the_lower_one(spread, index, ruleset):
+    """Not a surcharge: 160+ scores the upper band alone, same 12 as before."""
+    fired = _rules_for(_res_item(*spread), index, ruleset)
+    assert "huge-total-res" in fired
+    assert "high-total-res" not in fired
+
+
+def test_res_bands_never_both_fire(index, ruleset):
+    """Regression: nested, these double-scored every 160+ roll."""
+    for each in range(40, 71, 2):
+        fired = _rules_for(_res_item(each, each, each), index, ruleset) & {
+            "high-total-res", "huge-total-res"
+        }
+        assert len(fired) <= 1, f"{each * 3} total res fired {fired}"
+
+
+def test_splitting_the_res_bands_preserved_every_total(index, ruleset):
+    """The split must not move any score: 6 below 160, 12 at or above."""
+    for each in range(40, 71, 2):
+        v = assess(from_stash_json(_res_item(each, each, each), index), ruleset)
+        band = {h.rule_id: h.score for h in v.hits}
+        total = band.get("high-total-res", 0) + band.get("huge-total-res", 0)
+        expected = 12 if each * 3 >= 160 else 6 if each * 3 >= 130 else 0
+        assert total == expected, f"{each * 3} total res scored {total}, expected {expected}"
+
+
+def test_triple_res_still_stacks_with_a_total_band(index, ruleset):
+    """It keys off the count of resistances, not the total, so it is a
+    genuinely separate signal and is deliberately left additive."""
+    fired = _rules_for(_res_item(45, 45, 45), index, ruleset)
+    assert {"triple-res", "high-total-res"} <= fired
+
+
 def test_negative_value_mods_compare_on_magnitude(index, ruleset):
     """-7 to mana cost must satisfy `min: 4`, not fail it for being negative."""
     v = assess(from_stash_json(F.MANA_COST_RING, index), ruleset)
