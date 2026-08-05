@@ -82,10 +82,14 @@ class FakeTrade:
 def stubbed(monkeypatch, tmp_path):
     monkeypatch.setattr(scanner, "StashClient", FakeStash)
     monkeypatch.setattr(scanner, "TradeClient", FakeTrade)
-    # Keep the cache out of the user's real home directory.
+    # Keep both persistent files out of the user's real home directory. The
+    # cache is the obvious one; the rate-limit state matters more, because
+    # scan() ends in limiter.save(force=True) and rewriting the real budget
+    # file from a test run corrupts the accounting that prevents a ban.
     import poescan.cache as cache_mod
 
     monkeypatch.setattr(cache_mod, "CACHE_DB", tmp_path / "cache.sqlite")
+    monkeypatch.setattr(scanner, "RATELIMIT_STATE", tmp_path / "ratelimit.json")
     yield
 
 
@@ -211,6 +215,82 @@ def test_fresh_ignores_cache(stubbed, cfg, index):
     again = scan(cfg, token=None, cache_hours=0, **kw)
     assert again.cache_hits == 0
     assert again.market_checks > 0
+
+
+# -- feature logging (calibration data) -------------------------------------
+
+
+def _cached(item_id: str):
+    import poescan.cache as cache_mod
+
+    with cache_mod.Cache() as cache:
+        return cache.get_check(item_id, "Allflame", 72.0)
+
+
+def test_market_checks_record_item_features(stubbed, cfg, index):
+    """Each priced observation must keep the item that produced it."""
+    scan(cfg, token=None, index=index, ruleset=Ruleset.load(), tabs_wanted=["dump1"])
+    feats = _cached("tailwind-boots").payload["item"]
+    assert feats["base_type"]
+    assert feats["ilvl"] > 0
+    assert "boots-tailwind" in feats["rules_hit"]
+    assert any("Tailwind" in m["t"] for m in feats["mods"])
+
+
+def test_features_are_backfilled_onto_older_checks(stubbed, cfg, index):
+    """Checks stored before feature logging existed are still salvageable."""
+    import poescan.cache as cache_mod
+
+    kw = dict(index=index, ruleset=Ruleset.load(), tabs_wanted=["dump1"])
+    scan(cfg, token=None, **kw)
+
+    with cache_mod.Cache() as cache:  # strip features, as an old row would be
+        stale = dict(_cached("tailwind-boots").payload)
+        stale.pop("item")
+        cache.conn.execute(
+            "UPDATE market_check SET payload = ? WHERE item_id = ?",
+            (json.dumps(stale), "tailwind-boots"),
+        )
+        cache.conn.commit()
+
+    again = scan(cfg, token=None, **kw)
+    assert again.market_checks == 0  # backfill must not cost an API call
+    assert _cached("tailwind-boots").payload["item"]["base_type"]
+
+
+def test_observations_expose_features_paired_with_outcome(stubbed, cfg, index):
+    """The calibration dataset: what the item was, and what the market said."""
+    import poescan.cache as cache_mod
+
+    scan(cfg, token=None, index=index, ruleset=Ruleset.load(), tabs_wanted=["dump1"])
+    with cache_mod.Cache() as cache:
+        obs = {o["item_id"]: o for o in cache.observations("Allflame")}
+
+    boots = obs["tailwind-boots"]
+    assert boots["base_type"]
+    assert "boots-tailwind" in boots["rules_hit"]
+    assert boots["median"] == 200.0  # FakeTrade prices it at 180/200/240
+    assert boots["total"] == 4
+
+
+def test_observations_skip_rows_without_features(stubbed, cfg, index):
+    """Checks predating feature logging have no item side and are not guessed."""
+    import poescan.cache as cache_mod
+
+    scan(cfg, token=None, index=index, ruleset=Ruleset.load(), tabs_wanted=["dump1"])
+    with cache_mod.Cache() as cache:
+        cache.conn.execute("UPDATE market_check SET payload = '{}'")
+        cache.conn.commit()
+        assert cache.observations("Allflame") == []
+
+
+def test_backfill_does_not_refresh_cache_age(stubbed, cfg, index):
+    """Restamping checked_at on every hit would make a row immortal."""
+    kw = dict(index=index, ruleset=Ruleset.load(), tabs_wanted=["dump1"])
+    scan(cfg, token=None, **kw)
+    before = _cached("tailwind-boots").checked_at
+    scan(cfg, token=None, **kw)
+    assert _cached("tailwind-boots").checked_at == before
 
 
 def test_unmatched_tab_name_reports_available_tabs(stubbed, cfg, index):

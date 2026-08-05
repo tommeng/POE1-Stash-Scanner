@@ -3,6 +3,24 @@
 Dump tabs are append-mostly: rescanning one re-presents mostly the same items.
 Since an item's mods never change, a market check stays useful for days, and
 caching it is what makes repeated scans affordable against the API budget.
+
+The ``payload`` column is JSON and holds three keys:
+
+    filters   the human-readable list of what the trade query compared on
+    listings  the sampled listings, enough to recompute cheapest/median
+    item      the item's own features - base type, ilvl, flags, mods
+
+``item`` exists because every scan already pays for real price observations,
+and pairing them with the item that produced them is the only cheap source of
+evidence for calibrating the ruleset. Triage scores are currently hand-authored
+priors; this is what would let them be measured instead. Written by
+``scanner._features``; the cache itself stays dependency-free and treats it as
+an opaque dict.
+
+Note this is one row per item (upsert on ``item_id``), so a re-check replaces
+the earlier observation rather than appending to it. That is the right
+behaviour for a cache and adequate for calibration - each item is its own data
+point - but it means no per-item price history.
 """
 
 from __future__ import annotations
@@ -86,7 +104,7 @@ class Cache:
             payload=payload,
         )
 
-    def put_check(self, item_id: str, league: str, result) -> None:
+    def put_check(self, item_id: str, league: str, result, features: dict | None = None) -> None:
         self.conn.execute(
             """INSERT INTO market_check
                  (item_id, league, checked_at, total, cheapest, median, query_url, payload)
@@ -116,11 +134,77 @@ class Cache:
                             }
                             for l in result.listings
                         ],
+                        "item": features or {},
                     }
                 ),
             ),
         )
         self.conn.commit()
+
+    def backfill_features(self, item_id: str, league: str, features: dict) -> bool:
+        """Attach item features to a check that was stored without them.
+
+        Rows written before feature logging existed still hold a perfectly good
+        market observation; this fills in the item side so the accumulated
+        cache becomes usable as calibration data rather than starting empty.
+
+        Deliberately does *not* touch ``checked_at`` - refreshing that on every
+        cache hit would make a row immortal and the item would never be
+        re-priced.
+        """
+        row = self.conn.execute(
+            "SELECT payload FROM market_check WHERE item_id = ? AND league = ?",
+            (item_id, league),
+        ).fetchone()
+        if not row:
+            return False
+        try:
+            payload = json.loads(row["payload"] or "{}")
+        except json.JSONDecodeError:
+            payload = {}
+        if payload.get("item"):
+            return False
+        payload["item"] = features
+        self.conn.execute(
+            "UPDATE market_check SET payload = ? WHERE item_id = ? AND league = ?",
+            (json.dumps(payload), item_id, league),
+        )
+        self.conn.commit()
+        return True
+
+    def observations(self, league: str | None = None) -> list[dict]:
+        """Every check that carries item features, as (features + outcome).
+
+        This is the calibration dataset: what the item was, paired with what
+        the market said about it. Rows written before feature logging existed
+        have no item side and are skipped rather than guessed at.
+        """
+        sql = "SELECT * FROM market_check"
+        args: tuple = ()
+        if league:
+            sql += " WHERE league = ?"
+            args = (league,)
+        out: list[dict] = []
+        for row in self.conn.execute(sql, args):
+            try:
+                payload = json.loads(row["payload"] or "{}")
+            except json.JSONDecodeError:
+                continue
+            features = payload.get("item")
+            if not features:
+                continue
+            out.append(
+                {
+                    **features,
+                    "item_id": row["item_id"],
+                    "league": row["league"],
+                    "checked_at": row["checked_at"],
+                    "total": row["total"] or 0,
+                    "cheapest": row["cheapest"],
+                    "median": row["median"],
+                }
+            )
+        return out
 
     def dismiss(self, item_id: str, note: str = "") -> None:
         self.conn.execute(

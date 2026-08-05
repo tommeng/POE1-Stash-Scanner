@@ -236,9 +236,16 @@ class RateLimiter:
             horizon = max(r.period for r in rules)
             # Stored as wall-clock; translate back into this process's clock and
             # drop anything that has already aged out of the longest window.
+            #
+            # A stamp can legitimately read as *newer* than now: save() rounds to
+            # the millisecond, so a just-recorded hit can round a hair into the
+            # future, and a wall clock can step backwards under NTP. Both are
+            # clamped to age 0 rather than discarded. Forgetting a request we
+            # really made is what makes the next run fire blind and earn a ban,
+            # so when in doubt the safe direction is to keep the hit.
             for wall_ts in entry.get("timestamps") or []:
-                age = wall_now - float(wall_ts)
-                if 0 <= age < horizon:
+                age = max(0.0, wall_now - float(wall_ts))
+                if age < horizon:
                     bucket.timestamps.append(mono_now - age)
             blocked_wall = float(entry.get("blocked_until") or 0)
             if blocked_wall > wall_now:
@@ -265,10 +272,15 @@ class RateLimiter:
                 for t in list(bucket.timestamps)
                 if (mono_now - t) < horizon
             ]
+            blocked_for = max(0.0, bucket.blocked_until - mono_now)
             policies[policy] = {
                 "rules": ",".join(f"{r.hits}:{r.period:g}:{r.penalty:g}" for r in bucket.rules),
                 "timestamps": [round(t, 3) for t in stamps],
-                "blocked_until": round(wall_now + max(0.0, bucket.blocked_until - mono_now), 3),
+                # Only persist a block that is actually in force. Writing
+                # wall_now for an unblocked bucket means an immediate reload
+                # reads it back as a block, since rounding can leave it a
+                # millisecond in the future.
+                "blocked_until": round(wall_now + blocked_for, 3) if blocked_for else 0.0,
             }
 
         try:

@@ -136,17 +136,48 @@ def test_more_slack_widens_a_negative_bound(client, index, ruleset):
 # -- relaxation retry -------------------------------------------------------
 
 
-class RecordingClient(TradeClient):
-    """Captures searches and replays scripted responses, no network."""
+class _FetchResponse:
+    """The shape price_check expects back from a listing fetch."""
 
-    def __init__(self, responses):
+    status_code = 200
+
+    def __init__(self, payload):
+        self._payload = payload
+
+    def json(self):
+        return self._payload
+
+
+class RecordingClient(TradeClient):
+    """Captures searches and replays scripted responses, no network.
+
+    Nothing in this file may touch the live API: the trade endpoints are rate
+    limited with a ban rather than a soft 429, so a test suite that reaches
+    them spends a budget the user needs and eventually blocks on it.
+    """
+
+    def __init__(self, responses, fetch_rows=None):
         super().__init__("Allflame")
         self.responses = list(responses)
+        self.fetch_rows = list(fetch_rows or [])
         self.searches = []
+        self.fetches = 0
 
     def _search(self, query):
         self.searches.append(query)
         return self.responses.pop(0), ""
+
+    def _request(self, method, url, policy, **kw):
+        """Stub the listing fetch.
+
+        price_check fetches listings whenever a search returns ids, and only
+        _search was stubbed here - so every scripted response carrying an id
+        sent a live request to GGG on each run of the suite. That spent the
+        real 6-hour fetch budget and let the rate limiter stall the whole suite
+        for a full 300s window once the allowance ran out.
+        """
+        self.fetches += 1
+        return _FetchResponse({"result": self.fetch_rows})
 
 
 def test_strict_query_with_no_hits_is_retried_wider(index, ruleset):
@@ -173,6 +204,37 @@ def test_no_retry_when_the_strict_query_finds_something(index, ruleset):
 
     assert len(c.searches) == 1
     assert result.relaxed is False
+    assert c.fetches == 1  # and served from the stub, not the live API
+
+
+def test_the_suite_never_reaches_the_live_trade_api(index, ruleset, monkeypatch):
+    """Guard against re-introducing live calls.
+
+    A search that returns ids makes price_check fetch the listings. When only
+    _search was stubbed, that fetch went to GGG for real on every run - which
+    spends a budget enforced by bans, not 429s. If the fetch stub is ever
+    removed, this fails instead of quietly costing the user requests.
+    """
+    def explode(*a, **kw):
+        raise AssertionError("a test tried to reach the live trade API")
+
+    monkeypatch.setattr(TradeClient, "_request", explode)
+
+    it = from_stash_json(F.PLUS_ONE_WAND, index)
+    c = RecordingClient(
+        [{"id": "q1", "result": ["a"], "total": 12}],
+        fetch_rows=[
+            {
+                "listing": {"price": {"amount": 5, "currency": "chaos"}},
+                "item": {"name": "Doom Finger", "typeLine": "Wand"},
+            }
+        ],
+    )
+    result = c.price_check(it, assess(it, ruleset))
+    c.close()
+
+    assert c.fetches == 1
+    assert [listing.price_amount for listing in result.listings] == [5.0]
 
 
 def test_genuinely_unique_item_stays_at_zero(index, ruleset):
@@ -355,6 +417,91 @@ def test_reasonable_result_count_is_left_alone(index, ruleset):
 
     assert len(c.searches) == 1
     assert result.tightened is False and result.relaxed is False
+
+
+# -- base type survey -------------------------------------------------------
+
+
+def test_base_market_isolates_the_base_with_no_stat_filters():
+    """The survey's whole point is that the base is the only thing varying."""
+    c = RecordingClient([{"id": "q1", "result": ["a"], "total": 2882}])
+    result = c.base_market("Opal Ring", ilvl_min=84, price_min=50)
+    c.close()
+
+    q = c.searches[0]["query"]
+    assert q["type"] == "Opal Ring"
+    assert "stats" not in q
+    tf = q["filters"]["type_filters"]["filters"]
+    assert tf["rarity"]["option"] == "rare"
+    assert tf["ilvl"]["min"] == 84
+    trade_f = q["filters"]["trade_filters"]["filters"]
+    assert trade_f["sale_type"]["option"] == "priced"
+    assert trade_f["price"]["min"] == 50
+    assert result.total == 2882
+
+
+def test_base_market_counts_without_fetching():
+    """The count is the measurement, so a survey costs one search per base.
+
+    Reading prices instead does not work: sorting ascending across a saturated
+    market returns the 1c floor for every base, good or bad.
+    """
+    c = RecordingClient([{"id": "q1", "result": ["a", "b"], "total": 2882}])
+    c.base_market("Opal Ring")
+    c.close()
+    assert c.fetches == 0
+
+
+def test_base_market_omits_filters_it_was_not_given():
+    c = RecordingClient([{"id": "q1", "result": [], "total": 0}])
+    c.base_market("Iron Ring")
+    c.close()
+    q = c.searches[0]["query"]
+    assert "ilvl" not in q["filters"]["type_filters"]["filters"]
+    assert "price" not in q["filters"]["trade_filters"]["filters"]
+
+
+def test_base_value_measures_white_bases_not_rares():
+    """A rare's price is its mods; only an unrolled base prices the base.
+
+    Every mod-carrying design inverted the true ranking live, putting Sapphire
+    and Iron Rings above Opal. White bases put Opal first, as they should.
+    """
+    c = RecordingClient(
+        [{"id": "q1", "result": ["a"], "total": 13}],
+        fetch_rows=[
+            {"listing": {"price": {"amount": 18, "currency": "chaos"}}, "item": {}},
+            {"listing": {"price": {"amount": 22, "currency": "chaos"}}, "item": {}},
+        ],
+    )
+    result = c.base_value("Opal Ring", ilvl_min=84, influence="shaper")
+    c.close()
+
+    q = c.searches[0]["query"]
+    assert q["filters"]["type_filters"]["filters"]["rarity"]["option"] == "normal"
+    assert q["filters"]["misc_filters"]["filters"]["shaper_item"]["option"] == "true"
+    assert q["type"] == "Opal Ring"
+    assert "stats" not in q
+    assert result.total == 13
+    assert result.median == 20.0
+
+
+def test_base_value_treats_an_unsold_base_as_a_signal():
+    """Nobody listing a base unrolled is itself evidence it is worthless."""
+    c = RecordingClient([{"id": "q1", "result": [], "total": 0}])
+    result = c.base_value("Iron Ring", influence="shaper")
+    c.close()
+    assert result.total == 0
+    assert result.median is None
+    assert c.fetches == 0
+
+
+def test_base_market_reports_a_dead_base_honestly():
+    c = RecordingClient([{"id": "q1", "result": [], "total": 0}])
+    result = c.base_market("Iron Ring")
+    c.close()
+    assert result.total == 0
+    assert result.summary == "no comparable listings"
 
 
 def test_summary_flags_a_floor_price_rather_than_implying_a_valuation():

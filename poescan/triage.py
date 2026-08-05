@@ -11,7 +11,14 @@ A rule is a list of conditions plus a score. Conditions can test:
     mod_any: any of several templates  {mod_any: [...], min: 20}
     stat:    a trade stat id           {stat: explicit.stat_124131830, min: 1}
     flag:    a boolean item property   {flag: influenced}
+    base:    an exact base type        {base_any: [Opal Ring, Two-Stone Ring]}
     ilvl / links / sockets / quality   {ilvl: {min: 84}}
+
+Base type is a much finer test than ``category``: an Opal Ring and an Iron Ring
+are both ``accessory.ring``. Note that base value is conditional rather than
+intrinsic - seven of the ten known-1c reference rings are ilvl 83-85 Two-Stone
+Rings, a base meta knowledge calls desirable - so a ``base`` condition almost
+always belongs alongside an ``ilvl`` or mod condition rather than scoring alone.
 """
 
 from __future__ import annotations
@@ -202,6 +209,16 @@ def evaluate_condition(cond: dict, item: Item, p: Pseudo, matched: list | None =
     for key, getter in _SCALARS.items():
         if key in cond:
             return _in_range(getter(item), cond[key])
+
+    if "base" in cond or "base_any" in cond:
+        # Exact, case-insensitive - base type names are fixed strings from the
+        # game data, so a substring match would silently conflate "Ruby Ring"
+        # with "Ruby Flask". Use base_matches for families.
+        wanted = {b.strip().lower() for b in _as_list(cond.get("base")) + _as_list(cond.get("base_any"))}
+        return item.base_type.strip().lower() in wanted
+
+    if "base_matches" in cond:
+        return bool(re.search(str(cond["base_matches"]), item.base_type, re.IGNORECASE))
 
     if "category" in cond:
         return item.category in _as_list(cond["category"])

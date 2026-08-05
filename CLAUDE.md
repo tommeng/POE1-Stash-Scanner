@@ -6,11 +6,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 uv sync                                   # install
-uv run pytest                             # 168 tests, ~1.5s
+uv run pytest                             # 193 tests, ~0.7s (fully offline)
 uv run pytest tests/test_ratelimit.py     # one file
 uv run pytest -k test_reduced_resolves    # one test by name
-uv run poescan validate-rules             # every mod string in the ruleset still maps to a real trade stat
+uv run poescan validate-rules             # every mod string and base name in the ruleset really exists
 uv run poescan budget                     # remaining API allowance; reads saved state, makes no requests
+uv run poescan analyse                    # what the accumulated checks say; makes no requests
+uv run poescan survey-bases --category accessory.ring --ilvl 84 --influence shaper
 uvx ruff check poescan --select F,E9      # ruff is not configured in pyproject; invoke it explicitly
 ```
 
@@ -79,6 +81,36 @@ not argument.
   put `+54 Accuracy Rating` above real mods and "priced" a 2c amulet at 570c against three
   coincidental matches. Accuracy, light radius, mana regen, hybrid attributes etc. are excluded
   when narrowing.
+
+### Calibration: measuring instead of guessing
+
+The 49 rule scores in `default.yaml` are hand-authored priors. Nothing measured them, and the
+repo's own finding that triage score doesn't predict price is what unmeasured priors look like.
+Two commands exist to replace them with evidence.
+
+**`analyse`** reads `market_check` back. Every scan already pays for real price observations, and
+`scanner._features` now records the item that produced each one — base, ilvl, flags, mods,
+`rules_hit`. `analyse` reports, per rule and per base, the price distribution of the items it
+fired on. Free, offline, and it compounds with every scan. Checks written before feature logging
+carry no item side; `Cache.backfill_features` labels them on the next cache hit, so one ordinary
+scan over the same tabs retro-labels the whole cache for zero API calls.
+
+**`survey-bases`** measures what a base is worth on its own. It queries **white (normal rarity)
+influenced** bases, and that specific choice is the entire finding — four other designs were
+built and killed against the live API, each ranking Sapphire and Iron Rings *above* Opal:
+
+| design | why it failed |
+|---|---|
+| floor price of rares | sorting ascending across a saturated market finds the 1c market floor, identical for every base |
+| share of rares above a price | the denominator saturates at the API's 10000 result cap, inflating popular bases |
+| price leaving a fixed count | a fixed count is not a fixed quantile — top-300 of 50000 listings is the 99th percentile, of 1700 the 83rd |
+| price leaving a fixed fraction | removes that error and still inverts |
+
+All four measured **rare** items, whose price is dominated by their mods; the base is a sliver of
+the variance and gets swamped. A white base has no mods, so its price *is* the base. Verified
+live: Vermillion 60c, Opal 20c, Two-Stone 2c, Sapphire and Iron not listed unrolled at all —
+which is itself the signal. `--influence` matters, since the crafting-base market is almost
+entirely influenced items.
 
 ### Mod text ↔ trade stat translation (`tradedata.py`)
 
@@ -150,6 +182,12 @@ rare gear and are excluded unless named explicitly.
 - `tests/data/real_rings.json` holds ten rings scraped from live trade, all listed at 1 chaos.
   They are the regression guard against the ruleset drifting loose. Re-run after any rule edit.
 - The `index` fixture downloads trade metadata to `~/.poescan/data` on first run, then is offline.
+- **No test may reach the live trade API.** The endpoints ban rather than soft-fail, so a suite
+  that calls them spends a budget the user needs and eventually blocks on it — `test_trade.py`
+  once leaked ~4 real fetches per run this way, because only `_search` was stubbed and
+  `price_check` fetches listings whenever a search returns ids.
+  `test_the_suite_never_reaches_the_live_trade_api` guards it. Tests that run `scan()` must also
+  point `RATELIMIT_STATE` at a tmp path, or they rewrite the user's real budget accounting.
 - Fixtures in `tests/fixtures.py` mirror the real stash JSON shape, so they exercise the same
   parsing path as live data.
 
