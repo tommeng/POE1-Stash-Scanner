@@ -120,7 +120,11 @@ def classify(icon: str, base_type: str) -> str:
             return category
     name = (base_type or "").lower()
     for suffix, category in _NAME_CATEGORIES:
-        if name.endswith(suffix):
+        # Whole final word, not a trailing substring. A plain endswith() reads
+        # "ring" out of Suffering, Offering, Scouring, Keyring and Offspring,
+        # which put essences, gems, scarabs and heist keyrings into
+        # accessory.ring - 18 of the 57 "ring bases" a survey enumerated.
+        if name == suffix or name.endswith(" " + suffix):
             return category
     return "unknown"
 

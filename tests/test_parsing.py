@@ -72,7 +72,28 @@ def test_base_types_resolve_to_categories_by_name():
     rings = [b for b in base_type_names() if classify("", b) == "accessory.ring"]
     assert "Two-Stone Ring" in rings
     assert "Opal Ring" in rings
-    assert all(b.lower().endswith("ring") for b in rings)
+    # Every entry must be a ring, not merely a word ending in those letters.
+    # The previous form of this assertion was `endswith("ring")`, which is
+    # satisfied by Suffering and Offering and so could never have failed.
+    assert all(b == "Ring" or b.endswith(" Ring") for b in rings)
+
+
+@pytest.mark.parametrize(
+    "not_a_ring",
+    [
+        "Orb of Scouring",            # currency
+        "Deafening Essence of Suffering",
+        "Bone Offering",              # gem
+        "Divination Scarab of Pilfering",
+        "Essential Keyring",          # heist
+        "The Offspring",              # divination card
+        "Runegraft of Suffering",
+    ],
+)
+def test_words_ending_in_ring_are_not_rings(not_a_ring):
+    """A trailing substring match swept 18 of these into accessory.ring, and a
+    survey then spent a third of its API budget pricing them."""
+    assert classify("", not_a_ring) != "accessory.ring"
 
 
 def test_art_path_decodes_icon():

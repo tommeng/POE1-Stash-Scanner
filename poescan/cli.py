@@ -30,7 +30,7 @@ from .items import CATEGORY_LABELS, classify
 from .report import render
 from .ratelimit import RateLimiter
 from .scanner import open_stash, scan, select_tabs
-from .trade import DEFAULT_STATUS, STATUS_OPTIONS, TradeClient
+from .trade import DEFAULT_STATUS, MIN_CONFIDENT_SAMPLE, STATUS_OPTIONS, TradeClient
 from .stash import StashError
 from .tradedata import (
     base_type_names,
@@ -792,27 +792,52 @@ def cmd_survey_bases(args) -> int:
     table = Table(title=f"Unrolled base prices - {slug}", header_style="bold")
     table.add_column("base")
     table.add_column("listed", justify="right")
+    table.add_column("priced", justify="right")
     table.add_column("cheapest", justify="right")
     table.add_column("median", justify="right")
-    priced = [r for r in rows if r["median"] is not None]
-    baseline = _median([r["median"] for r in priced])
+    # Only samples that clear the confidence floor set the comparison point.
+    # A median drawn from one or two listings is an anecdote, and one troll
+    # listing moves it arbitrarily far - a 3-listing Topaz Ring priced 2c at
+    # the cheap end reported a median of 14421c.
+    confident = [r for r in rows if r["priced_sample"] >= MIN_CONFIDENT_SAMPLE]
+    baseline = _median([r["median"] for r in confident])
     ranked = sorted(rows, key=lambda r: -(r["median"] or -1))
     for r in ranked:
+        n = r["priced_sample"]
         if r["error"]:
-            table.add_row(r["base"], "[red]error[/]", "", f"[dim]{r['error'][:40]}[/]")
+            table.add_row(r["base"], "[red]error[/]", "", "", f"[dim]{r['error'][:40]}[/]")
         elif r["listed"] == 0:
-            table.add_row(r["base"], "0", "", "[dim]not sold as a base[/]")
+            table.add_row(r["base"], "0", "0", "", "[dim]not sold as a base[/]")
         elif r["median"] is None:
-            table.add_row(r["base"], str(r["listed"]), "", "[dim]no convertible prices[/]")
+            table.add_row(r["base"], str(r["listed"]), "0", "", "[dim]no convertible prices[/]")
+        elif n < MIN_CONFIDENT_SAMPLE:
+            table.add_row(
+                r["base"],
+                str(r["listed"]),
+                f"[yellow]{n}[/]",
+                f"{r['cheapest']:.0f}c",
+                f"[dim]{r['median']:.0f}c (n={n}, not comparable)[/]",
+            )
         else:
             table.add_row(
                 r["base"],
                 str(r["listed"]),
+                str(n),
                 f"{r['cheapest']:.0f}c",
                 _price_cell(r["median"], baseline),
             )
     console.print(table)
     console.print(f"\nSaved to [bold]{out}[/]")
+
+    thin = [r for r in rows if r["median"] is not None and r["priced_sample"] < MIN_CONFIDENT_SAMPLE]
+    if thin:
+        console.print(
+            f"\n[yellow]{len(thin)} of {len([r for r in rows if r['median'] is not None])} "
+            f"priced rows fall below the {MIN_CONFIDENT_SAMPLE}-listing confidence floor.[/]\n"
+            "Their medians are shown but not ranked against the others, and are not used as\n"
+            "the comparison point. The crafting-base market is genuinely thin, so this is\n"
+            "normal - it means the numbers are directional, not measured."
+        )
     console.print(
         "\n[dim]These are WHITE (unrolled) bases, so the price is the base itself rather\n"
         "than the mods on it. Measuring rares instead does not work - their price is\n"
