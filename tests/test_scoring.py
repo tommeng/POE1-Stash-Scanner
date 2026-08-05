@@ -135,6 +135,55 @@ def test_defence_alone_scores_below_a_rare_mod(index, ruleset):
     assert _score(perfect_defence, index, ruleset) < _score(F.MANA_COST_RING, index, ruleset)
 
 
+# -- life bands -------------------------------------------------------------
+#
+# The two life rules are disjoint bands rather than a base score plus a bonus.
+# Nested additive rules cannot be told apart by `analyse`: the narrower one can
+# never fire alone, so it reports the same population and the same median as
+# the wider one no matter what it is worth. These tests pin the bands apart.
+
+
+def _life_item(effective_life: int):
+    """A body armour whose only notable property is its life roll."""
+    return F.item(baseType="Astral Plate", explicitMods=[f"+{effective_life} to maximum Life"])
+
+
+def _rules_for(raw, index, ruleset) -> set:
+    return {h.rule_id for h in assess(from_stash_json(raw, index), ruleset).hits}
+
+
+@pytest.mark.parametrize("life", [90, 100, 114])
+def test_mid_life_roll_scores_the_lower_band_only(life, index, ruleset):
+    assert _rules_for(_life_item(life), index, ruleset) == {"high-life"}
+
+
+@pytest.mark.parametrize("life", [115, 130, 200])
+def test_top_life_roll_scores_the_upper_band_only(life, index, ruleset):
+    """The upper band replaces the lower one; it is not a surcharge on top."""
+    assert _rules_for(_life_item(life), index, ruleset) == {"very-high-life"}
+
+
+def test_life_bands_never_both_fire(index, ruleset):
+    """Regression: the bands were once nested, double-scoring every top roll."""
+    for life in range(85, 205, 5):
+        fired = _rules_for(_life_item(life), index, ruleset) & {"high-life", "very-high-life"}
+        assert len(fired) <= 1, f"{life} life fired {fired}"
+
+
+def test_a_top_life_roll_alone_still_earns_a_market_check(index, ruleset):
+    """Life alone is usually a 5c item, but the tail is not: of the 20 priced
+    items promoted by life alone, four were worth 25c-75c. Triage is a filter,
+    so this band is deliberately scored above promote_score."""
+    v = assess(from_stash_json(_life_item(130), index), ruleset)
+    assert v.promoted
+
+
+def test_a_merely_high_life_roll_does_not_earn_a_market_check(index, ruleset):
+    """The lower band is a co-factor - it needs a second signal to promote."""
+    v = assess(from_stash_json(_life_item(100), index), ruleset)
+    assert not v.promoted
+
+
 def test_negative_value_mods_compare_on_magnitude(index, ruleset):
     """-7 to mana cost must satisfy `min: 4`, not fail it for being negative."""
     v = assess(from_stash_json(F.MANA_COST_RING, index), ruleset)
@@ -192,6 +241,26 @@ def _base_rules(*conds) -> Ruleset:
 
 def _fires(raw, index, rs) -> bool:
     return "base-test" in {h.rule_id for h in assess(from_stash_json(raw, index), rs).hits}
+
+
+def test_none_conditions_suppress_an_otherwise_matching_rule(index):
+    """`none` is how one rule is carved out of a wider one, as the life bands do."""
+    rs = Ruleset(
+        {
+            "settings": {"promote_score": 1, "min_ilvl": 0},
+            "rules": [
+                {
+                    "id": "base-test",
+                    "score": 5,
+                    "all": [{"pseudo": "life", "min": 90}],
+                    "none": [{"pseudo": "life", "min": 115}],
+                }
+            ],
+        }
+    )
+    assert _fires(F.item(explicitMods=["+100 to maximum Life"]), index, rs)
+    assert not _fires(F.item(explicitMods=["+130 to maximum Life"]), index, rs)
+    assert not _fires(F.item(explicitMods=["+50 to maximum Life"]), index, rs)
 
 
 def test_base_matches_exact_name(index):

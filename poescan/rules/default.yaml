@@ -86,18 +86,40 @@ rules:
       - {flag: synthesised}
 
   # Defensive stats are deliberately scored low. Life+resists is the baseline
-  # every rare has; on its own it is a 1-chaos item however well it rolled.
-  # These scores are sized so defence alone tops out below promote_score, and
-  # only tips over when combined with an offensive or utility mod.
+  # every rare has; on its own it is a 1-chaos item however well it rolled. An
+  # ordinary defensive roll therefore stays below promote_score and only tips
+  # over when combined with an offensive or utility mod - the exception being
+  # the top life band below, which is promoted on its own for measured reasons.
+  #
+  # The two life rules are disjoint *bands*, not a base score plus a bonus.
+  # They used to be nested (>=90 scoring 7, >=115 adding a further 5), which
+  # meant the second could never fire without the first - a surcharge, not a
+  # second signal. `analyse` duly reported both firing on an identical set of
+  # 24 items with an identical 5c median, and nested additive rules can never
+  # report anything else, whatever the thresholds are worth. Each band now
+  # carries its whole score, so the two rows in `analyse` describe different
+  # populations and can finally be compared. Totals are unchanged: 7 for
+  # 90-114, 12 for 115+.
+  #
+  # 12 is above promote_score, so a top-band life roll earns a market check on
+  # its own. That is deliberate and measured: of the 20 items promoted by life
+  # alone, the median was 4.75c - but the tail held items at 75c, 50c, 33.5c
+  # and 25c. Triage is a filter, judged on what it wrongly discards, so scoring
+  # this band below promote_score to save 20 API calls would be a bad trade.
+  #
+  # Note the empty 90-114 band in `analyse` is survivorship, not evidence: at 7
+  # points such an item is never checked unless something else scores too.
   - id: high-life
     score: 7
     note: "High life roll"
     exclude_categories: [jewel.base, jewel.abyss, jewel.cluster, flask]
     all:
       - {pseudo: life, min: 90}
+    none:
+      - {pseudo: life, min: 115}
 
   - id: very-high-life
-    score: 5
+    score: 12
     note: "Near top-tier life"
     exclude_categories: [jewel.base, jewel.abyss, jewel.cluster, flask]
     all:
