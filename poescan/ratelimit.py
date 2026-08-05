@@ -16,9 +16,11 @@ hit of headroom in each window.
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 
 
 @dataclass(frozen=True)
@@ -93,8 +95,7 @@ class Bucket:
     def sync_from_headers(self, headers) -> None:
         """Adopt GGG's advertised policy and reconcile our count with theirs."""
         now = self.clock()
-        rules = _parse_rules(_pick(headers, "x-rate-limit-ip", "x-rate-limit-account", "x-rate-limit-client"))
-        state = _parse_rules(_pick(headers, "x-rate-limit-ip-state", "x-rate-limit-account-state", "x-rate-limit-client-state"))
+        rules, state = _merge_policies(headers)
 
         with self._lock:
             if rules:
@@ -156,14 +157,127 @@ def _pick(headers, *names: str) -> str | None:
     return None
 
 
-class RateLimiter:
-    """Holds one Bucket per GGG rate-limit policy (search, fetch, ...)."""
+# GGG can enforce several rule sets at once against the same request. The stash
+# endpoint publishes both, and they disagree:
+#
+#     x-rate-limit-account: 30:60:60,  100:1800:600
+#     x-rate-limit-ip:      45:60:120, 180:1800:600
+#
+# Honouring only the first one found would allow 44 requests a minute against a
+# 30-a-minute account cap. Every published set binds simultaneously, so they are
+# merged per period, keeping the tightest allowance and the most pessimistic
+# reported usage - which may come from different sets.
+_RULE_KINDS = ("account", "ip", "client")
 
-    def __init__(self, clock=time.monotonic, sleeper=time.sleep) -> None:
+
+def _merge_policies(headers) -> "tuple[list[Rule], list[Rule]]":
+    by_period: dict[float, tuple[Rule, int, float]] = {}
+
+    for kind in _RULE_KINDS:
+        rules = _parse_rules(headers.get(f"x-rate-limit-{kind}"))
+        state = _parse_rules(headers.get(f"x-rate-limit-{kind}-state"))
+        for i, rule in enumerate(rules):
+            used = state[i].hits if i < len(state) else 0
+            penalty = state[i].penalty if i < len(state) else 0.0
+            current = by_period.get(rule.period)
+            if current is None:
+                by_period[rule.period] = (rule, used, penalty)
+                continue
+            best_rule, best_used, best_penalty = current
+            by_period[rule.period] = (
+                rule if rule.hits < best_rule.hits else best_rule,
+                max(used, best_used),
+                max(penalty, best_penalty),
+            )
+
+    periods = sorted(by_period)
+    merged_rules = [by_period[p][0] for p in periods]
+    merged_state = [Rule(by_period[p][1], p, by_period[p][2]) for p in periods]
+    return merged_rules, merged_state
+
+
+class RateLimiter:
+    """Holds one Bucket per GGG rate-limit policy (search, fetch, ...).
+
+    State is persisted across processes. Without that, every CLI invocation
+    starts with empty buckets and fires its first request blind - so running
+    two scans back to back is exactly how you earn a ban, since the second one
+    has no idea the first just spent the budget.
+    """
+
+    def __init__(self, clock=time.monotonic, sleeper=time.sleep, state_path=None) -> None:
         self._buckets: dict[str, Bucket] = {}
         self._lock = threading.Lock()
         self._clock = clock
         self._sleeper = sleeper
+        self._state_path = Path(state_path) if state_path else None
+        self._last_saved = 0.0
+        if self._state_path:
+            self.load()
+
+    # -- persistence ------------------------------------------------------
+
+    def load(self) -> None:
+        """Restore usage recorded by earlier runs."""
+        if not self._state_path or not self._state_path.exists():
+            return
+        try:
+            data = json.loads(self._state_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            return
+
+        wall_now, mono_now = time.time(), self._clock()
+        for policy, entry in (data.get("policies") or {}).items():
+            rules = _parse_rules(entry.get("rules") or "")
+            if not rules:
+                continue
+            bucket = self.bucket(policy)
+            bucket.rules = rules
+            horizon = max(r.period for r in rules)
+            # Stored as wall-clock; translate back into this process's clock and
+            # drop anything that has already aged out of the longest window.
+            for wall_ts in entry.get("timestamps") or []:
+                age = wall_now - float(wall_ts)
+                if 0 <= age < horizon:
+                    bucket.timestamps.append(mono_now - age)
+            blocked_wall = float(entry.get("blocked_until") or 0)
+            if blocked_wall > wall_now:
+                bucket.blocked_until = mono_now + (blocked_wall - wall_now)
+
+    def save(self, force: bool = False) -> None:
+        """Write usage out so the next process inherits it."""
+        if not self._state_path:
+            return
+        wall_now, mono_now = time.time(), self._clock()
+        if not force and (wall_now - self._last_saved) < 2.0:
+            return
+        self._last_saved = wall_now
+
+        policies = {}
+        with self._lock:
+            buckets = list(self._buckets.items())
+        for policy, bucket in buckets:
+            if not bucket.rules:
+                continue
+            horizon = max(r.period for r in bucket.rules)
+            stamps = [
+                wall_now - (mono_now - t)
+                for t in list(bucket.timestamps)
+                if (mono_now - t) < horizon
+            ]
+            policies[policy] = {
+                "rules": ",".join(f"{r.hits}:{r.period:g}:{r.penalty:g}" for r in bucket.rules),
+                "timestamps": [round(t, 3) for t in stamps],
+                "blocked_until": round(wall_now + max(0.0, bucket.blocked_until - mono_now), 3),
+            }
+
+        try:
+            self._state_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._state_path.with_suffix(".tmp")
+            tmp.write_text(json.dumps({"policies": policies}))
+            tmp.replace(self._state_path)
+        except OSError:
+            pass
 
     def bucket(self, policy: str) -> Bucket:
         with self._lock:
@@ -193,6 +307,7 @@ class RateLimiter:
             return
         b = self.bucket(policy)
         b.sync_from_headers(response.headers)
+        self.save()
         if response.status_code == 429:
             retry = response.headers.get("retry-after")
             if retry:
@@ -202,3 +317,5 @@ class RateLimiter:
                     b.note_retry_after(60.0)
             else:
                 b.note_retry_after(60.0)
+            # A ban must survive the process that earned it.
+            self.save(force=True)

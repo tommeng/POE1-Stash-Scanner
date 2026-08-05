@@ -169,3 +169,134 @@ def test_budget_remaining_reports_tightest_rule():
     b = Bucket("t", rules=[Rule(5, 10, 60), Rule(30, 300, 1800)])
     left, period = b.budget_remaining()
     assert (left, period) == (29, 300.0)
+
+
+# -- multiple simultaneous rule sets ----------------------------------------
+
+
+def stash_headers():
+    """Real headers from the stash endpoint - account is stricter than ip."""
+    return FakeHeaders({
+        "x-rate-limit-policy": "backend-item-request-limit",
+        "x-rate-limit-rules": "Account,Ip",
+        "x-rate-limit-account": "30:60:60,100:1800:600",
+        "x-rate-limit-account-state": "1:60:0,5:1800:0",
+        "x-rate-limit-ip": "45:60:120,180:1800:600",
+        "x-rate-limit-ip-state": "1:60:0,5:1800:0",
+    })
+
+
+def test_tightest_rule_wins_across_rule_sets():
+    """Honouring only the ip set would allow 44/min against a 30/min account cap."""
+    b = Bucket("stash", clock=lambda: 1000.0)
+    b.sync_from_headers(stash_headers())
+    assert [(r.hits, r.period) for r in b.rules] == [(30, 60.0), (100, 1800.0)]
+
+
+def test_merged_rules_actually_throttle_at_the_account_cap():
+    clock = FakeClock()
+    lim = RateLimiter(clock=clock, sleeper=clock.sleep)
+    b = lim.bucket("stash")
+    b.sync_from_headers(stash_headers())
+
+    # Budget is 30 - 1 headroom = 29 in the 60s window; the ip set would say 44.
+    for _ in range(29 - 1):  # one hit already backfilled from the state header
+        assert lim.wait("stash") == 0.0
+    assert lim.wait("stash") > 0, "should throttle before the 30/min account cap"
+
+
+def test_most_pessimistic_usage_wins_across_rule_sets():
+    """If one set reports more usage than another, believe the worse one."""
+    h = FakeHeaders({
+        "x-rate-limit-policy": "p",
+        "x-rate-limit-account": "30:60:60",
+        "x-rate-limit-account-state": "29:60:0",
+        "x-rate-limit-ip": "45:60:120",
+        "x-rate-limit-ip-state": "2:60:0",
+    })
+    b = Bucket("p", clock=lambda: 1000.0)
+    b.sync_from_headers(h)
+    # 29 of 30 used - the next request must wait, not sail through on ip's "2".
+    assert b.delay_until_free(1000.0) > 0
+
+
+def test_a_penalty_in_any_rule_set_blocks():
+    h = FakeHeaders({
+        "x-rate-limit-policy": "p",
+        "x-rate-limit-account": "30:60:60",
+        "x-rate-limit-account-state": "30:60:45",
+        "x-rate-limit-ip": "45:60:120",
+        "x-rate-limit-ip-state": "2:60:0",
+    })
+    b = Bucket("p", clock=lambda: 1000.0)
+    b.sync_from_headers(h)
+    assert b.delay_until_free(1000.0) >= 44.0
+
+
+def test_single_rule_set_still_works():
+    b = Bucket("trade", clock=lambda: 1000.0)
+    b.sync_from_headers(headers(rules="5:10:60,15:60:300", state="1:10:0,1:60:0"))
+    assert [(r.hits, r.period) for r in b.rules] == [(5, 10.0), (15, 60.0)]
+
+
+# -- persistence across processes -------------------------------------------
+
+
+def test_usage_survives_a_new_limiter(tmp_path):
+    """Without this, back-to-back scans each start blind and can earn a ban."""
+    path = tmp_path / "rl.json"
+    first = RateLimiter(state_path=path)
+    b = first.bucket("trade-search-request-limit")
+    b.rules = _parse_rules("5:10:60,30:300:1800")
+    for _ in range(4):
+        first.wait("trade-search-request-limit")
+    first.save(force=True)
+
+    second = RateLimiter(state_path=path)
+    restored = second.bucket("trade-search-request-limit")
+    assert restored.rules == b.rules
+    assert len(restored.timestamps) == 4
+    assert restored.delay_until_free() > 0, "fresh process must inherit the spent budget"
+
+
+def test_expired_usage_is_not_restored(tmp_path):
+    path = tmp_path / "rl.json"
+    lim = RateLimiter(state_path=path)
+    b = lim.bucket("p")
+    b.rules = _parse_rules("5:10:60")
+    # Record a hit far outside the 10s window.
+    b.timestamps.append(b.clock() - 3600)
+    lim.save(force=True)
+
+    assert RateLimiter(state_path=path).bucket("p").timestamps == []
+
+
+def test_a_ban_survives_the_process_that_earned_it(tmp_path):
+    path = tmp_path / "rl.json"
+    lim = RateLimiter(state_path=path)
+    b = lim.bucket("p")
+    b.rules = _parse_rules("5:10:60")
+    b.note_retry_after(120.0)
+    lim.save(force=True)
+
+    restored = RateLimiter(state_path=path).bucket("p")
+    assert restored.delay_until_free() > 100
+
+
+def test_missing_or_corrupt_state_is_not_fatal(tmp_path):
+    assert RateLimiter(state_path=tmp_path / "absent.json")._buckets == {}
+    bad = tmp_path / "bad.json"
+    bad.write_text("{not json")
+    assert RateLimiter(state_path=bad)._buckets == {}
+
+
+def test_save_is_atomic(tmp_path):
+    """A crash mid-write must not leave an unreadable state file."""
+    path = tmp_path / "rl.json"
+    lim = RateLimiter(state_path=path)
+    lim.bucket("p").rules = _parse_rules("5:10:60")
+    lim.save(force=True)
+    assert path.exists()
+    assert not path.with_suffix(".tmp").exists()
+    import json as _json
+    _json.loads(path.read_text())

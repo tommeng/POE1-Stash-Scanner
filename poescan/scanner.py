@@ -6,7 +6,7 @@ import time
 from dataclasses import dataclass, field
 
 from .cache import Cache
-from .config import Config
+from .config import RATELIMIT_STATE, Config
 from .items import Item
 from .ratelimit import RateLimiter
 from .stash import LegacyStashClient, StashClient, Tab
@@ -179,7 +179,7 @@ def scan(
     status: str = DEFAULT_STATUS,
     progress=None,
 ) -> ScanReport:
-    limiter = RateLimiter()
+    limiter = RateLimiter(state_path=RATELIMIT_STATE)
     report = ScanReport(league=cfg.league)
     tabs_wanted = tabs_wanted if tabs_wanted is not None else list(cfg.tabs or [])
 
@@ -254,6 +254,7 @@ def scan(
                 checked += 1
             report.market_checks = checked
 
+    limiter.save(force=True)
     candidates.sort(key=lambda c: -c.interest)
     report.candidates = candidates
     return report

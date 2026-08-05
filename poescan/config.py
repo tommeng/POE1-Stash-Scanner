@@ -12,6 +12,7 @@ APP_DIR = Path(os.environ.get("POESCAN_HOME", Path.home() / ".poescan"))
 CONFIG_PATH = APP_DIR / "config.json"
 TOKEN_PATH = APP_DIR / "token.json"
 CACHE_DB = APP_DIR / "cache.sqlite"
+RATELIMIT_STATE = APP_DIR / "ratelimit.json"
 DATA_DIR = APP_DIR / "data"
 REPORT_DIR = APP_DIR / "reports"
 

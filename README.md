@@ -207,6 +207,46 @@ Special tabs (Currency, Maps, Gems, Flasks…) can't hold rare gear and are skip
 Market checks are cached in SQLite for 72 hours keyed on item id, so rescanning a tab you've
 already looked at costs almost nothing.
 
+## Rate limits
+
+Exceeding a GGG rate limit earns a **timed ban**, not a soft rejection, and the ban scales with
+which window you broke — 60s for the short one, up to 30 minutes for a longer one. So the client
+never probes the limit and backs off; it throttles *before* each request so it never hits it at all.
+
+Three things make that work:
+
+- **Limits come from GGG, not from constants.** Every response carries `X-Rate-Limit` headers giving
+  both the rules and your current usage. Those are parsed and obeyed, so a change on GGG's side is
+  picked up automatically. One request of headroom is reserved in every window.
+- **All published rule sets are honoured, not just the first.** The stash endpoint enforces an
+  account limit *and* an IP limit simultaneously, and they differ (30/min vs 45/min). They're merged
+  per window, keeping the tightest allowance and the most pessimistic reported usage.
+- **Usage persists between runs.** Limits are per-account and per-IP, not per-process, so state is
+  saved to `~/.poescan/ratelimit.json`. Without that, running two scans back to back would have the
+  second one start blind and spend a budget the first already used — which is exactly how you'd earn
+  a ban. An active ban survives the process that earned it, too.
+
+Check where you stand at any time. This reads saved state and makes no requests:
+
+```bash
+uv run poescan budget
+```
+
+```
+                API allowance remaining
+┏━━━━━━━━━━━━━━━━┳━━━━━━━━┳━━━━━━┳━━━━━━┳━━━━━━━━━━━━━┓
+┃ policy         ┃ window ┃ used ┃ left ┃             ┃
+┡━━━━━━━━━━━━━━━━╇━━━━━━━━╇━━━━━━╇━━━━━━╇━━━━━━━━━━━━━┩
+│ trade-search   │    10s │    2 │    2 │ ##########  │
+│ trade-search   │   300s │   13 │   16 │ ########    │
+│ trade-search   │     6h │   34 │  565 │ #           │
+└────────────────┴────────┴──────┴──────┴─────────────┘
+```
+
+Caching helps too: market checks are stored for 72 hours keyed on item id, so rescanning a tab you
+have already looked at spends almost nothing. `--no-verify` skips the trade API entirely, and
+`diagnose` never touches it.
+
 ## Tuning
 
 `poescan/rules/default.yaml` is the domain knowledge, and it's meant to be edited — the PoE meta
@@ -243,14 +283,13 @@ sorts the noise to the bottom.
 - **The ruleset encodes a snapshot of the meta** and will need occasional edits.
 - **Triage can miss niche items.** A mod combination that's worthless to most builds but perfect
   for one is exactly the case hand-written rules don't catch.
-- **Rate limits are real.** Roughly 30 searches per 5 minutes and 600 per 6 hours. The client reads
-  GGG's own `X-Rate-Limit` headers and self-throttles rather than risk a ban, so large scans take
-  minutes rather than seconds.
+- **Rate limits are real.** Roughly 30 searches per 5 minutes and 600 per 6 hours, so large scans
+  take minutes rather than seconds. See below for how they're handled.
 
 ## Development
 
 ```bash
-uv run pytest                             # 158 tests, ~1s
+uv run pytest                             # 168 tests, ~1.5s
 uv run pytest tests/test_ratelimit.py     # one file
 uv run pytest -k test_reduced_resolves    # one test
 uvx ruff check poescan --select F,E9

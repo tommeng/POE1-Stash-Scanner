@@ -6,10 +6,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 uv sync                                   # install
-uv run pytest                             # 158 tests, ~1s
+uv run pytest                             # 168 tests, ~1.5s
 uv run pytest tests/test_ratelimit.py     # one file
 uv run pytest -k test_reduced_resolves    # one test by name
 uv run poescan validate-rules             # every mod string in the ruleset still maps to a real trade stat
+uv run poescan budget                     # remaining API allowance; reads saved state, makes no requests
 uvx ruff check poescan --select F,E9      # ruff is not configured in pyproject; invoke it explicitly
 ```
 
@@ -103,6 +104,18 @@ reports them. `Has N Abyssal Socket` is correctly unresolvable (a socket propert
 Driven entirely by GGG's own `X-Rate-Limit` headers rather than hardcoded limits, because GGG
 changes them without notice. Rules are `hits:period:penalty`; exceeding one earns a **timed ban**,
 not a soft 429, so every bucket keeps one hit of headroom.
+
+Two things beyond the obvious:
+
+**All published rule sets bind at once.** The stash endpoint returns both `x-rate-limit-account`
+(30:60:60) and `x-rate-limit-ip` (45:60:120). Honouring only one would allow 44 requests/min against
+a 30/min cap. `_merge_policies` merges them per period, keeping the tightest rule and the most
+pessimistic usage, which may come from different sets.
+
+**State persists to `~/.poescan/ratelimit.json`.** Limits are per-account/per-IP, not per-process, so
+a fresh `RateLimiter` would otherwise fire its first request blind — running two scans back to back
+was a genuine ban risk. Timestamps are stored as wall-clock and translated back into monotonic time
+on load; anything already outside the longest window is dropped. Writes are atomic via a temp file.
 
 The subtle part is `sync_from_headers`. A long window's count includes hits that are long past;
 stamping them all at `now` makes a 6-hour count of 32 look like 32 hits in the last 10 seconds and

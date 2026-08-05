@@ -15,7 +15,7 @@ from rich.table import Table
 from . import __version__
 from .auth import AuthError, authorize, get_token
 from .cache import Cache
-from .config import Config, account_problem, clean_poesessid, poesessid_problem
+from .config import RATELIMIT_STATE, Config, account_problem, clean_poesessid, poesessid_problem
 from .items import CATEGORY_LABELS
 from .report import render
 from .ratelimit import RateLimiter
@@ -139,7 +139,7 @@ def cmd_tabs(args) -> int:
         return _err(str(e))
 
     try:
-        with open_stash(cfg, token, RateLimiter()) as stash:
+        with open_stash(cfg, token, RateLimiter(state_path=RATELIMIT_STATE)) as stash:
             tabs = stash.flat_tabs()
     except StashError as e:
         return _err(str(e))
@@ -331,7 +331,7 @@ def cmd_diagnose(args) -> int:
     tabs_wanted = [t.strip() for t in args.tabs.split(",")] if args.tabs else list(cfg.tabs or [])
 
     try:
-        with console.status("[bold]Reading stash..."), open_stash(cfg, token, RateLimiter()) as stash:
+        with console.status("[bold]Reading stash..."), open_stash(cfg, token, RateLimiter(state_path=RATELIMIT_STATE)) as stash:
             chosen = select_tabs(stash.flat_tabs(), tabs_wanted)
             if not chosen:
                 return _err(f"No tabs matched {tabs_wanted!r}. Run `poescan tabs` to list them.")
@@ -480,6 +480,53 @@ def cmd_categories(args) -> int:
     return 0
 
 
+def cmd_budget(args) -> int:
+    """Show how much API allowance is left, per policy.
+
+    Uses only persisted state - makes no requests of its own.
+    """
+    lim = RateLimiter(state_path=RATELIMIT_STATE)
+    policies = sorted(lim._buckets)
+    if not policies:
+        console.print("[dim]No usage recorded yet. Limits are learned from the first response.[/]")
+        return 0
+
+    table = Table(title="API allowance remaining", header_style="bold")
+    table.add_column("policy")
+    table.add_column("window", justify="right")
+    table.add_column("used", justify="right")
+    table.add_column("left", justify="right")
+    table.add_column("")
+
+    for name in policies:
+        b = lim.bucket(name)
+        now = b.clock()
+        blocked = max(0.0, b.blocked_until - now)
+        for rule in b.rules:
+            used = len([t for t in b.timestamps if t > now - rule.period])
+            budget = max(1, rule.hits - b.headroom)
+            left = max(0, budget - used)
+            bar = "#" * int(20 * used / max(1, budget))
+            window = f"{rule.period:g}s" if rule.period < 3600 else f"{rule.period / 3600:g}h"
+            colour = "red" if left == 0 else "yellow" if left < budget * 0.25 else "green"
+            table.add_row(
+                name.replace("-request-limit", ""),
+                window,
+                str(used),
+                f"[{colour}]{left}[/]",
+                f"[dim]{bar}[/]",
+            )
+        if blocked > 0:
+            table.add_row("", "", "", "[red]BANNED[/]", f"[red]{blocked:.0f}s remaining[/]")
+
+    console.print(table)
+    console.print(
+        "\n[dim]Counts are shared with anything else using your IP/account, and are learned\n"
+        "from GGG's own headers. `left` already reserves one request of headroom.[/]"
+    )
+    return 0
+
+
 def cmd_cache(args) -> int:
     with Cache() as cache:
         if args.clear:
@@ -563,6 +610,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("categories", help="list category ids usable in rules")
     s.set_defaults(func=cmd_categories)
+
+    s = sub.add_parser("budget", help="show remaining API allowance (makes no requests)")
+    s.set_defaults(func=cmd_budget)
 
     s = sub.add_parser("cache", help="inspect or clear the cache")
     s.add_argument("--clear", action="store_true", help="drop cached market checks")
