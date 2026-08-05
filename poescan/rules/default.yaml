@@ -132,14 +132,25 @@ rules:
       - {pseudo: count_elemental_resistances, min: 3}
       - {pseudo: elemental_resistance, min: 100}
 
+  # Disjoint bands, for the same reason as the life rules above: nested
+  # additive rules cannot be told apart by `analyse`, because the narrower one
+  # can never fire alone. Totals are unchanged - 6 for 130-159, 12 for 160+ -
+  # so no promotion decision moves. Unlike the life bands there is no
+  # measurement here yet: neither rule has fired on a single priced item. That
+  # is exactly why the split matters, since it is the precondition for ever
+  # getting one. `triple-res` is left stacking on purpose - it keys off the
+  # *count* of resistances rather than the total, so it is a genuinely separate
+  # signal and can fire on items these two do not.
   - id: high-total-res
     score: 6
     note: "High total resistance"
     all:
       - {pseudo: total_resistance, min: 130}
+    none:
+      - {pseudo: total_resistance, min: 160}
 
   - id: huge-total-res
-    score: 6
+    score: 12
     note: "Exceptional total resistance"
     all:
       - {pseudo: total_resistance, min: 160}
