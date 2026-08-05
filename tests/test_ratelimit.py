@@ -1,5 +1,8 @@
 """Rate limiter tests - the piece most likely to earn a ban if it is wrong."""
 
+import json
+import time
+
 from poescan.ratelimit import Bucket, RateLimiter, Rule, _parse_rules
 
 
@@ -281,6 +284,55 @@ def test_a_ban_survives_the_process_that_earned_it(tmp_path):
 
     restored = RateLimiter(state_path=path).bucket("p")
     assert restored.delay_until_free() > 100
+
+
+def _state(tmp_path, name, **policy) -> "RateLimiter":
+    """Load a limiter from a hand-written state file."""
+    path = tmp_path / name
+    path.write_text(json.dumps({"policies": {"p": {"rules": "5:10:60", **policy}}}))
+    return RateLimiter(state_path=path)
+
+
+def test_save_reload_round_trip_keeps_every_timestamp(tmp_path):
+    """Regression: this round trip used to lose *all* recorded usage roughly a
+    third of the time, purely on where millisecond rounding landed, leaving the
+    next process convinced it had a full budget it had already spent."""
+    for i in range(50):
+        path = tmp_path / f"rl{i}.json"
+        first = RateLimiter(state_path=path)
+        first.bucket("p").rules = _parse_rules("5:10:60,30:300:1800")
+        for _ in range(4):
+            first.wait("p")
+        first.save(force=True)
+        assert len(RateLimiter(state_path=path).bucket("p").timestamps) == 4
+
+
+def test_a_timestamp_a_hair_in_the_future_is_kept(tmp_path):
+    """save() rounds to the millisecond, so a just-recorded hit can land
+    fractionally ahead of the reading process's clock."""
+    lim = _state(tmp_path, "ahead.json", timestamps=[time.time() + 0.002], blocked_until=0)
+    assert len(lim.bucket("p").timestamps) == 1
+
+
+def test_a_backwards_clock_step_does_not_discard_usage(tmp_path):
+    """An NTP correction must not wipe the record. Treating those hits as
+    just-now is the pessimistic reading, which is the safe one here."""
+    lim = _state(tmp_path, "ntp.json", timestamps=[time.time() + 3600] * 3, blocked_until=0)
+    assert len(lim.bucket("p").timestamps) == 3
+
+
+def test_an_unblocked_bucket_does_not_persist_a_block(tmp_path):
+    """Writing wall_now for an idle bucket made an immediate reload read it
+    back as a block, stalling a scan that was free to proceed."""
+    path = tmp_path / "idle.json"
+    lim = RateLimiter(state_path=path)
+    lim.bucket("p").rules = _parse_rules("5:10:60")
+    lim.save(force=True)
+
+    assert json.loads(path.read_text())["policies"]["p"]["blocked_until"] == 0.0
+    restored = RateLimiter(state_path=path).bucket("p")
+    assert restored.blocked_until == 0.0
+    assert restored.delay_until_free() == 0.0
 
 
 def test_missing_or_corrupt_state_is_not_fatal(tmp_path):
