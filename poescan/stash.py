@@ -13,11 +13,36 @@ from .items import Item, from_stash_json
 from .ratelimit import RateLimiter
 from .tradedata import StatIndex
 
-STASH_POLICY = "stash-request-limit"
+# The name GGG files stash requests under. This has to match the value of the
+# `x-rate-limit-policy` header exactly, because that header is what decides
+# which bucket observe() writes usage and bans into. Guessing a different name
+# means waiting on a bucket that never receives anything - no rules, no
+# recorded hits, so no throttling at all, and every request fires immediately
+# until the endpoint bans you. `_PolicyTracking` re-learns it from each response
+# so a rename by GGG self-corrects rather than silently disabling the limiter.
+STASH_POLICY = "backend-item-request-limit"
 
 
 class StashError(RuntimeError):
     pass
+
+
+class _PolicyTracking:
+    """Keeps a client's rate-limit bucket name in step with the server's.
+
+    Shared by both stash clients: whichever policy name the response carries is
+    the one the next wait() must use, or the limiter throttles against an empty
+    bucket.
+    """
+
+    limiter: RateLimiter
+    _policy: str = STASH_POLICY
+
+    def _observe(self, resp) -> None:
+        self.limiter.observe(resp)
+        name = resp.headers.get("x-rate-limit-policy")
+        if name:
+            self._policy = name
 
 
 @dataclass
@@ -34,7 +59,7 @@ class Tab:
         return self.type.lower() == "folder"
 
 
-class StashClient:
+class StashClient(_PolicyTracking):
     def __init__(self, token: Token, league: str, limiter: RateLimiter | None = None) -> None:
         self.token = token
         self.league = league
@@ -58,13 +83,13 @@ class StashClient:
         self.close()
 
     def _get(self, path: str) -> dict:
-        self.limiter.wait(STASH_POLICY)
+        self.limiter.wait(self._policy)
         resp = self._client.get(f"{API_BASE}{path}")
-        self.limiter.observe(resp)
+        self._observe(resp)
         if resp.status_code == 429:
-            self.limiter.wait(STASH_POLICY)
+            self.limiter.wait(self._policy)
             resp = self._client.get(f"{API_BASE}{path}")
-            self.limiter.observe(resp)
+            self._observe(resp)
         if resp.status_code == 401:
             raise StashError("Access token rejected (401). Run `poescan login` again.")
         if resp.status_code == 403:
@@ -106,7 +131,7 @@ class StashClient:
         return [from_stash_json(r, index, tab_name=tab.name, tab_id=tab.id) for r in raw_items]
 
 
-class LegacyStashClient:
+class LegacyStashClient(_PolicyTracking):
     """Stash access via the old ``get-stash-items`` endpoint and a POESESSID.
 
     Fallback for when an OAuth client id cannot be obtained - GGG currently is
@@ -171,12 +196,22 @@ class LegacyStashClient:
         self.close()
 
     def _get(self, **params) -> dict:
-        self.limiter.wait(STASH_POLICY)
+        self.limiter.wait(self._policy)
         params.setdefault("accountName", self.account_name)
         params.setdefault("league", self.league)
         params.setdefault("realm", self.realm)
         resp = self._client.get(self.BASE, params=params)
-        self.limiter.observe(resp)
+        self._observe(resp)
+        if resp.status_code == 429:
+            # observe() has already recorded the penalty, so wait() now sleeps
+            # it out. Without this a single rate limit kills the whole scan
+            # part-way through - and a full stash sits right on the 30/60s
+            # account cap, so tripping it is routine rather than exceptional.
+            # The OAuth client has always done this; the POESESSID path is the
+            # one most installs use, since GGG stopped issuing OAuth clients.
+            self.limiter.wait(self._policy)
+            resp = self._client.get(self.BASE, params=params)
+            self._observe(resp)
         if resp.status_code == 403:
             raise StashError(
                 "Forbidden (403). Either the POESESSID is stale - log in to "

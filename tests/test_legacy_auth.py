@@ -114,6 +114,89 @@ def test_requests_items_by_tab_index(index):
     assert items[0].position == "col 3, row 4"
 
 
+def test_throttles_against_the_bucket_the_server_names():
+    """The bug this pins left the stash endpoint completely unthrottled.
+
+    observe() files usage under whatever `x-rate-limit-policy` says, so a
+    client that waits on a different name waits on an empty bucket: no rules,
+    no recorded hits, no delay, every request fired at once until GGG bans it.
+    """
+    def handler(request):
+        return httpx.Response(
+            200,
+            json={"tabs": [], "items": []},
+            headers={
+                "x-rate-limit-policy": "backend-item-request-limit",
+                "x-rate-limit-account": "30:60:60",
+                "x-rate-limit-account-state": "1:60:0",
+            },
+        )
+
+    c = _client(handler)
+    c.list_tabs()
+    bucket = c.limiter.bucket(c._policy)
+    c.close()
+
+    assert c._policy == "backend-item-request-limit"
+    assert [(r.hits, r.period) for r in bucket.rules] == [(30, 60.0)]
+    assert bucket.timestamps, "the bucket we pace against must be the one recording hits"
+
+
+def test_policy_name_is_relearned_if_ggg_renames_it():
+    def handler(request):
+        return httpx.Response(
+            200,
+            json={"tabs": [], "items": []},
+            headers={"x-rate-limit-policy": "some-new-name",
+                     "x-rate-limit-ip": "10:60:60",
+                     "x-rate-limit-ip-state": "1:60:0"},
+        )
+
+    c = _client(handler)
+    c.list_tabs()
+    c.close()
+    assert c._policy == "some-new-name"
+
+
+def test_429_is_waited_out_and_retried():
+    """A full stash sits right on the 30/60s account cap, so tripping it is
+    routine. Dying on the first 429 loses the whole scan part-way through."""
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(
+                429,
+                headers={"x-rate-limit-policy": "backend-item-request-limit",
+                         "retry-after": "1"},
+            )
+        return httpx.Response(200, json={"tabs": [], "items": []})
+
+    c = _client(handler)
+    slept: list[float] = []
+    c.limiter._sleeper = slept.append
+    c.list_tabs()
+    c.close()
+
+    assert calls["n"] == 2  # retried rather than raising
+    assert slept and max(slept) > 0, "must actually wait out the penalty"
+
+
+def test_a_second_429_is_reported_rather_than_looping():
+    def handler(request):
+        return httpx.Response(
+            429, headers={"x-rate-limit-policy": "backend-item-request-limit",
+                          "retry-after": "1"},
+        )
+
+    c = _client(handler)
+    c.limiter._sleeper = lambda s: None
+    with pytest.raises(StashError, match="429"):
+        c.list_tabs()
+    c.close()
+
+
 def test_403_explains_the_likely_causes():
     c = _client(lambda r: httpx.Response(403, text="<html>denied</html>"))
     with pytest.raises(StashError, match="stale|Cloudflare"):
