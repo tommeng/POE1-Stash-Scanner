@@ -177,6 +177,58 @@ def test_hits_record_the_mods_that_matched(index, ruleset):
     assert any("Tailwind" in m.text for m in tailwind.mods)
 
 
+# -- base type conditions ---------------------------------------------------
+
+
+def _base_rules(*conds) -> Ruleset:
+    """A one-rule ruleset scoring only on the given conditions."""
+    return Ruleset(
+        {
+            "settings": {"promote_score": 1, "min_ilvl": 0},
+            "rules": [{"id": "base-test", "score": 5, "all": list(conds)}],
+        }
+    )
+
+
+def _fires(raw, index, rs) -> bool:
+    return "base-test" in {h.rule_id for h in assess(from_stash_json(raw, index), rs).hits}
+
+
+def test_base_matches_exact_name(index):
+    assert _fires(F.item(baseType="Two-Stone Ring"), index, _base_rules({"base": "Two-Stone Ring"}))
+
+
+def test_base_is_case_insensitive(index):
+    assert _fires(F.item(baseType="Two-Stone Ring"), index, _base_rules({"base": "two-stone ring"}))
+
+
+def test_base_does_not_match_a_different_base(index):
+    assert not _fires(F.item(baseType="Two-Stone Ring"), index, _base_rules({"base": "Opal Ring"}))
+
+
+def test_base_any_matches_any_listed(index):
+    rs = _base_rules({"base_any": ["Opal Ring", "Two-Stone Ring"]})
+    assert _fires(F.item(baseType="Two-Stone Ring"), index, rs)
+
+
+def test_base_is_not_a_substring_match(index):
+    """Substring matching would conflate 'Ruby Ring' with 'Ruby Flask'."""
+    assert not _fires(F.item(baseType="Ruby Flask"), index, _base_rules({"base": "Ruby Ring"}))
+
+
+def test_base_matches_covers_families(index):
+    rs = _base_rules({"base_matches": "Two-Stone|Opal"})
+    assert _fires(F.item(baseType="Two-Stone Ring"), index, rs)
+    assert not _fires(F.item(baseType="Iron Ring"), index, rs)
+
+
+def test_base_combines_with_ilvl(index):
+    """Base value is conditional, so a base rule is expected to be qualified."""
+    rs = _base_rules({"base": "Two-Stone Ring"}, {"ilvl": {"min": 84}})
+    assert _fires(F.item(baseType="Two-Stone Ring", ilvl=86), index, rs)
+    assert not _fires(F.item(baseType="Two-Stone Ring", ilvl=80), index, rs)
+
+
 # -- calibration against real listings --------------------------------------
 
 

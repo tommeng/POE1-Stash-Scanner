@@ -53,6 +53,28 @@ def test_lookup_unknown_returns_none(tiny_index):
     assert tiny_index.lookup("+5 to Completely Invented Stat") is None
 
 
+def test_base_type_names_excludes_uniques():
+    """A unique is priced by name, not rolls, so it is not a survey subject."""
+    from poescan.tradedata import base_type_names
+
+    names = base_type_names()
+    assert "Two-Stone Ring" in names
+    assert "Vaal Regalia" in names
+    # Uniques carry a `name` in the trade item data and must be filtered out.
+    assert "Headhunter" not in names
+    assert len(names) == len(set(n.lower() for n in names))
+
+
+def test_base_types_resolve_to_categories_by_name():
+    """survey-bases enumerates a slot this way, with no icon to go on."""
+    from poescan.tradedata import base_type_names
+
+    rings = [b for b in base_type_names() if classify("", b) == "accessory.ring"]
+    assert "Two-Stone Ring" in rings
+    assert "Opal Ring" in rings
+    assert all(b.lower().endswith("ring") for b in rings)
+
+
 def test_art_path_decodes_icon():
     assert art_path(F.RING_ICON) == "2DItems/Rings/SapphireRuby"
 

@@ -111,6 +111,10 @@ DEFAULT_STATUS = "securable"
 # Above this many matches, the cheapest listings describe the market floor
 # rather than this item, so the search is re-run with more of the item's mods.
 BROAD_RESULT_THRESHOLD = 300
+
+# The trade API stops counting here. A total at the cap is a lower bound, not a
+# total, which makes it useless as the denominator of any share or quantile.
+_API_RESULT_CAP = 10000
 MAX_TIGHT_STATS = 5
 
 # Below this many priced listings, a median is noise rather than a market.
@@ -370,6 +374,12 @@ class TradeClient:
         if not ids:
             return result
 
+        return self._fetch_listings(result, query_id, ids, sample)
+
+    def _fetch_listings(
+        self, result: MarketResult, query_id: str, ids: list, sample: int
+    ) -> MarketResult:
+        """Read prices for the cheapest matches and attach them to ``result``."""
         want = ids[:sample]
         try:
             fresp = self._request(
@@ -405,6 +415,123 @@ class TradeClient:
                     mods=[_mod_desc(m) for m in (it.get("explicitMods") or [])],
                 )
             )
+        return result
+
+
+    # -- base type survey -------------------------------------------------
+
+    def base_market(
+        self,
+        base_type: str,
+        ilvl_min: int | None = None,
+        price_min: float | None = None,
+        influence: str | None = None,
+        rarity: str = "rare",
+        sample: int = 0,
+    ) -> MarketResult:
+        """How much of one base type's market sits above a price threshold.
+
+        Carries *no* stat filters, so the only things varying are the base, the
+        item level, and the price floor. Run identically across every base in a
+        slot, the share of listings above the threshold is a usable relative
+        measure of whether buyers pay extra for the base itself.
+
+        Measuring the cheap end instead does not work, and the reason is worth
+        keeping: sorting ascending across a saturated market finds the market
+        floor, which is 1 chaos for every base that has one. A survey built on
+        the cheapest listings returns 1c for good and bad bases alike. Worse,
+        floor listings are mostly priced in alchemy and alteration orbs, which
+        ``to_chaos`` cannot convert, so they drop out of ``priced`` entirely.
+
+        ``sample`` defaults to 0 - the count is the measurement, so no fetch is
+        needed and a survey costs one search per base.
+        """
+        trade_filters: dict = {"sale_type": {"option": "priced"}}
+        if price_min:
+            trade_filters["price"] = {"min": price_min}
+        query_body: dict = {
+            "status": {"option": self.status},
+            # The trade site puts base type at the top of the query, beside
+            # status, rather than among the type_filters. Both forms are
+            # accepted; this is the canonical one.
+            "type": base_type,
+            "filters": {
+                "type_filters": {"filters": {"rarity": {"option": rarity}}},
+                "trade_filters": {"filters": trade_filters},
+            },
+        }
+        described = [f"base = {base_type}", rarity]
+        if ilvl_min:
+            query_body["filters"]["type_filters"]["filters"]["ilvl"] = {"min": ilvl_min}
+            described.append(f"ilvl >= {ilvl_min}")
+        if influence:
+            query_body["filters"]["misc_filters"] = {
+                "filters": {f"{influence}_item": {"option": "true"}}
+            }
+            described.append(f"{influence} influenced")
+        if price_min:
+            described.append(f"price >= {price_min:g}c")
+
+        result = MarketResult(filters_used=described)
+        data, err = self._search({"query": query_body, "sort": {"price": "asc"}})
+        if data is None:
+            result.error = err
+            return result
+
+        query_id = data.get("id", "")
+        ids = data.get("result") or []
+        result.total = int(data.get("total") or len(ids))
+        result.query_url = (
+            f"{TRADE_BASE}/trade/search/{self.league}/{query_id}" if query_id else ""
+        )
+        if not ids or sample <= 0:
+            return result
+        return self._fetch_listings(result, query_id, ids, sample)
+
+
+    def base_value(
+        self,
+        base_type: str,
+        ilvl_min: int | None = None,
+        influence: str | None = None,
+        sample: int = 8,
+    ) -> MarketResult:
+        """What an unrolled base of this type sells for.
+
+        Queries **white** (normal rarity) items, not rares. That is the whole
+        trick, and it took four failed designs to find it: a rare item's price
+        is dominated by its mods, so the base contributes a sliver of the
+        variance and gets swamped. Measured live, every mod-carrying design
+        ranked Sapphire and Iron Rings above Opal - the exact inverse of the
+        truth. A white base has no mods, so its price *is* the base's price.
+
+        The designs that failed, so nobody re-tries them:
+
+        - *Floor price of rares* returns 1 chaos for every base with a market,
+          because sorting ascending across a saturated market finds the market
+          floor rather than anything about the base.
+        - *Share of rares above a price* divides by a total that saturates at
+          the API's 10000 cap, inflating exactly the popular bases.
+        - *A fixed target count* is not a fixed quantile: top-300 of a base
+          with 50000 listings is its 99th percentile, top-300 of one with 1700
+          is its 83rd.
+        - *A fixed fraction of rares* removes that error and still inverts,
+          because the mods were always the confound, not the normalisation.
+
+        ``influence`` matters more than it looks: the market for crafting bases
+        is overwhelmingly influenced ones, so an uninfluenced query finds
+        almost nothing. A total of zero is itself a strong signal - nobody
+        bothers to sell that base unrolled.
+
+        One search plus one fetch per base.
+        """
+        result = self.base_market(
+            base_type,
+            ilvl_min=ilvl_min,
+            influence=influence,
+            rarity="normal",
+            sample=sample,
+        )
         return result
 
 

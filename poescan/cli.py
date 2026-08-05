@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import json
+import statistics
 import sys
 import time
 from collections import Counter
@@ -15,14 +17,28 @@ from rich.table import Table
 from . import __version__
 from .auth import AuthError, authorize, get_token
 from .cache import Cache
-from .config import RATELIMIT_STATE, Config, account_problem, clean_poesessid, poesessid_problem
-from .items import CATEGORY_LABELS
+from .config import (
+    DATA_DIR,
+    RATELIMIT_STATE,
+    Config,
+    account_problem,
+    clean_poesessid,
+    ensure_dirs,
+    poesessid_problem,
+)
+from .items import CATEGORY_LABELS, classify
 from .report import render
 from .ratelimit import RateLimiter
 from .scanner import open_stash, scan, select_tabs
-from .trade import DEFAULT_STATUS, STATUS_OPTIONS
+from .trade import DEFAULT_STATUS, STATUS_OPTIONS, TradeClient
 from .stash import StashError
-from .tradedata import fetch as fetch_tradedata, load_stat_index, normalise
+from .tradedata import (
+    base_type_names,
+    base_types,
+    fetch as fetch_tradedata,
+    load_stat_index,
+    normalise,
+)
 from .triage import DEFAULT_RULES, Ruleset, assess
 
 console = Console()
@@ -421,12 +437,15 @@ def cmd_diagnose(args) -> int:
 
 
 def cmd_validate(args) -> int:
-    """Check every mod template in the ruleset resolves to a real trade stat."""
+    """Check every mod template and base type in the ruleset really exists."""
+    import re as _re
+
     import yaml
 
     path = Path(args.rules) if args.rules else DEFAULT_RULES
     data = yaml.safe_load(path.read_text()) or {}
     index = load_stat_index()
+    known_bases = base_types()
 
     problems: list[tuple[str, str, str]] = []
     checked = 0
@@ -454,13 +473,28 @@ def cmd_validate(args) -> int:
                         checked += 1
                         if sid not in index.by_id:
                             problems.append((rid, sid, "unknown stat id"))
+                    # A misspelled base matches nothing and fails silently.
+                    for b in _as_list(cond.get("base")) + _as_list(cond.get("base_any")):
+                        checked += 1
+                        if str(b).strip().lower() not in known_bases:
+                            problems.append((rid, b, "unknown base type"))
+                    if "base_matches" in cond:
+                        checked += 1
+                        pattern = str(cond["base_matches"])
+                        try:
+                            rx = _re.compile(pattern, _re.IGNORECASE)
+                        except _re.error as e:
+                            problems.append((rid, pattern, f"invalid regex: {e}"))
+                        else:
+                            if not any(rx.search(b) for b in known_bases):
+                                problems.append((rid, pattern, "matches no known base type"))
 
     if problems:
         console.print(f"[red]{len(problems)} problem(s)[/] in {checked} references:\n")
         for rid, ref, why in problems:
             console.print(f"  [bold]{rid}[/]: [yellow]{ref}[/]\n    {why}")
         return 1
-    console.print(f"[green]All {checked} mod references resolve.[/]")
+    console.print(f"[green]All {checked} references resolve.[/]")
     return 0
 
 
@@ -550,6 +584,245 @@ def cmd_refresh_data(args) -> int:
 # ---------------------------------------------------------------------------
 
 
+# The trade API stops counting here; a total at the cap is a floor, not a total.
+_API_RESULT_CAP = 10000
+
+
+def _median(values) -> float | None:
+    vals = sorted(v for v in values if v is not None)
+    return statistics.median(vals) if vals else None
+
+
+def _price_cell(med: float | None, baseline: float | None) -> str:
+    """A median, coloured by how it compares with the overall base rate."""
+    if med is None:
+        return "[dim]-[/]"
+    if baseline and med >= baseline * 2:
+        return f"[green]{med:.0f}c[/]"
+    if baseline and med <= baseline:
+        return f"[red]{med:.0f}c[/]"
+    return f"{med:.0f}c"
+
+
+def cmd_analyse(args) -> int:
+    """Read the accumulated market checks back and ask what they say.
+
+    Every scan already pays for real price observations. This pairs them with
+    the items that produced them, so the hand-authored scores can be checked
+    against outcomes instead of argued about. Makes no API calls.
+    """
+    cfg = Config.load()
+    league = args.league or cfg.league
+    with Cache() as cache:
+        rows = cache.observations(league)
+
+    if not rows:
+        console.print(
+            f"[yellow]No labelled observations for {league}.[/]\n\n"
+            "Checks only carry item features if they were written after feature\n"
+            "logging existed. Run a normal [bold]poescan scan[/] over the same tabs:\n"
+            "cached checks get re-labelled without spending any API calls."
+        )
+        return 0
+
+    priced = [r for r in rows if r.get("median") is not None]
+    baseline = _median([r["median"] for r in priced])
+
+    console.print(f"\n[bold]{len(rows)}[/] observations in {league}, [bold]{len(priced)}[/] priced.")
+    if baseline is not None:
+        lo = min(r["median"] for r in priced)
+        hi = max(r["median"] for r in priced)
+        console.print(f"Median price [bold]{baseline:.0f}c[/]  (range {lo:.0f}c - {hi:.0f}c)\n")
+    if len(priced) < 30:
+        console.print(
+            "[yellow]Small sample.[/] Treat everything below as direction, not calibration -\n"
+            "a row backed by two items is an anecdote.\n"
+        )
+
+    # -- does the triage score track price at all? --------------------------
+    buckets = [(0, 10), (10, 15), (15, 20), (20, 30), (30, 10_000)]
+    t = Table(title="Triage score vs price", header_style="bold")
+    t.add_column("score")
+    t.add_column("items", justify="right")
+    t.add_column("median price", justify="right")
+    for lo_s, hi_s in buckets:
+        got = [r["median"] for r in priced if lo_s <= (r.get("triage_score") or 0) < hi_s]
+        if not got:
+            continue
+        label = f"{lo_s}-{hi_s - 1}" if hi_s < 10_000 else f"{lo_s}+"
+        t.add_row(label, str(len(got)), _price_cell(_median(got), baseline))
+    console.print(t)
+    console.print(
+        "[dim]If this column is flat, the scores are filtering, not ranking - which is\n"
+        "what scanner.py already assumes. A rising column would be new information.[/]\n"
+    )
+
+    # -- which rules actually fire on items worth something? ----------------
+    by_rule: dict[str, list[float]] = {}
+    for r in priced:
+        for rid in r.get("rules_hit") or []:
+            by_rule.setdefault(rid, []).append(r["median"])
+
+    t = Table(title="Rules, by the price of items they fired on", header_style="bold")
+    t.add_column("rule")
+    t.add_column("fired", justify="right")
+    t.add_column("median price", justify="right")
+    for rid, prices in sorted(by_rule.items(), key=lambda kv: -(_median(kv[1]) or 0)):
+        if len(prices) < args.min_samples:
+            continue
+        t.add_row(rid, str(len(prices)), _price_cell(_median(prices), baseline))
+    console.print(t)
+
+    ruleset = Ruleset.load(args.rules)
+    never = [str(r.get("id", "?")) for r in ruleset.rules if str(r.get("id", "?")) not in by_rule]
+    if never:
+        console.print(
+            f"[dim]{len(never)} rules never fired on a priced item: "
+            + ", ".join(never[:12])
+            + ("..." if len(never) > 12 else "")
+            + "[/]\n"
+        )
+
+    # -- base types ---------------------------------------------------------
+    by_base: dict[str, list[float]] = {}
+    for r in priced:
+        if r.get("base_type"):
+            by_base.setdefault(r["base_type"], []).append(r["median"])
+
+    t = Table(title="Base types seen", header_style="bold")
+    t.add_column("base")
+    t.add_column("seen", justify="right")
+    t.add_column("median price", justify="right")
+    for base, prices in sorted(by_base.items(), key=lambda kv: -(_median(kv[1]) or 0))[:25]:
+        if len(prices) < args.min_samples:
+            continue
+        t.add_row(base, str(len(prices)), _price_cell(_median(prices), baseline))
+    console.print(t)
+    console.print(
+        "[dim]Your stash only shows bases you happen to own. For what a base is worth\n"
+        "on its own, run [bold]poescan survey-bases[/].[/]"
+    )
+    return 0
+
+
+def cmd_survey_bases(args) -> int:
+    """Measure what each base type in a slot floors at on the open market.
+
+    One search plus one fetch per base, no stat filters, so the only thing
+    varying is the base. See TradeClient.base_floor for why the price is read
+    rather than the listing count.
+    """
+    cfg = Config.load()
+    league = args.league or cfg.league
+
+    if args.bases:
+        bases = [b.strip() for b in args.bases.split(",") if b.strip()]
+        known = base_types()
+        unknown = [b for b in bases if b.lower() not in known]
+        if unknown:
+            return _err("unknown base type(s): " + ", ".join(unknown))
+    elif args.category:
+        bases = [b for b in base_type_names() if classify("", b) == args.category]
+        if not bases:
+            return _err(
+                f"no base types resolve to {args.category!r} by name.\n"
+                "Base types are matched by name suffix, which only works for jewellery,\n"
+                "wands, sceptres, bows and quivers. For anything else pass --bases with\n"
+                "explicit names, e.g. --bases 'Vaal Regalia,Astral Plate'."
+            )
+    else:
+        return _err("pass --category or --bases")
+
+    if args.limit:
+        bases = bases[: args.limit]
+
+    limiter = RateLimiter(state_path=RATELIMIT_STATE)
+    console.print(
+        f"\n[bold]{len(bases)}[/] base types to survey in [bold]{league}[/]"
+        f"{f' at ilvl >= {args.ilvl}' if args.ilvl else ''}."
+    )
+    console.print(
+        f"Cost: {len(bases)} searches and up to {len(bases)} fetches."
+    )
+    left = limiter.bucket("trade-search-request-limit").budget_remaining()
+    if left:
+        console.print(f"Search allowance left in the tightest window: [bold]{left[0]}[/]")
+    console.print("[dim]The limiter will pace this; expect it to take a while.[/]")
+
+    if not args.yes:
+        if not console.input("\nProceed? [y/N] ").strip().lower().startswith("y"):
+            console.print("Nothing spent.")
+            return 0
+
+    rows: list[dict] = []
+    with TradeClient(league, limiter, status=args.status) as trade:
+        trade.load_rates()  # so divine-priced bases convert to chaos
+        for i, base in enumerate(bases, 1):
+            console.print(f"[dim]({i}/{len(bases)})[/] {base}...")
+            r = trade.base_value(base, ilvl_min=args.ilvl, influence=args.influence)
+            rows.append(
+                {
+                    "base": base,
+                    "listed": r.total,
+                    "median": r.median,
+                    "cheapest": r.cheapest,
+                    "priced_sample": len(r.priced),
+                    "error": r.error,
+                }
+            )
+    limiter.save(force=True)
+
+    ensure_dirs()
+    slug = args.category or "custom"
+    out = Path(args.out) if args.out else DATA_DIR / f"base-survey-{slug}.json"
+    out.write_text(
+        json.dumps(
+            {
+                "league": league,
+                "ilvl_min": args.ilvl,
+                "influence": args.influence,
+                "status": args.status,
+                "surveyed_at": time.time(),
+                "bases": rows,
+            },
+            indent=2,
+        )
+    )
+
+    table = Table(title=f"Unrolled base prices - {slug}", header_style="bold")
+    table.add_column("base")
+    table.add_column("listed", justify="right")
+    table.add_column("cheapest", justify="right")
+    table.add_column("median", justify="right")
+    priced = [r for r in rows if r["median"] is not None]
+    baseline = _median([r["median"] for r in priced])
+    ranked = sorted(rows, key=lambda r: -(r["median"] or -1))
+    for r in ranked:
+        if r["error"]:
+            table.add_row(r["base"], "[red]error[/]", "", f"[dim]{r['error'][:40]}[/]")
+        elif r["listed"] == 0:
+            table.add_row(r["base"], "0", "", "[dim]not sold as a base[/]")
+        elif r["median"] is None:
+            table.add_row(r["base"], str(r["listed"]), "", "[dim]no convertible prices[/]")
+        else:
+            table.add_row(
+                r["base"],
+                str(r["listed"]),
+                f"{r['cheapest']:.0f}c",
+                _price_cell(r["median"], baseline),
+            )
+    console.print(table)
+    console.print(f"\nSaved to [bold]{out}[/]")
+    console.print(
+        "\n[dim]These are WHITE (unrolled) bases, so the price is the base itself rather\n"
+        "than the mods on it. Measuring rares instead does not work - their price is\n"
+        "dominated by their mods, which swamps the base entirely.\n"
+        "'not sold as a base' is a real signal: nobody bothers to list it unrolled.\n"
+        "Most crafting bases are influenced, so without --influence expect thin results.[/]"
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="poescan",
@@ -613,6 +886,40 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("budget", help="show remaining API allowance (makes no requests)")
     s.set_defaults(func=cmd_budget)
+
+    s = sub.add_parser(
+        "analyse", help="what do the accumulated market checks say? (makes no requests)"
+    )
+    s.add_argument("--league", help="override the configured league")
+    s.add_argument("--rules", help="path to a ruleset YAML")
+    s.add_argument(
+        "--min-samples",
+        type=int,
+        default=1,
+        help="hide rows backed by fewer items than this (default: 1)",
+    )
+    s.set_defaults(func=cmd_analyse)
+
+    s = sub.add_parser("survey-bases", help="measure what each base type floors at on the market")
+    s.add_argument("--category", help="category id to survey, e.g. accessory.ring")
+    s.add_argument("--bases", help="explicit base types instead, comma separated")
+    s.add_argument("--ilvl", type=int, help="only count listings at or above this item level")
+    s.add_argument(
+        "--influence",
+        choices=["shaper", "elder", "crusader", "hunter", "redeemer", "warlord"],
+        help="restrict to influenced bases - where the base is what is being sold",
+    )
+    s.add_argument("--limit", type=int, help="survey at most this many bases")
+    s.add_argument("--league", help="override the configured league")
+    s.add_argument(
+        "--status",
+        default=DEFAULT_STATUS,
+        choices=sorted(STATUS_OPTIONS),
+        help="which listings to price against (default: securable = instant buyout)",
+    )
+    s.add_argument("--out", help="write the survey JSON here")
+    s.add_argument("--yes", action="store_true", help="skip the cost confirmation")
+    s.set_defaults(func=cmd_survey_bases)
 
     s = sub.add_parser("cache", help="inspect or clear the cache")
     s.add_argument("--clear", action="store_true", help="drop cached market checks")

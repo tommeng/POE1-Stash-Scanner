@@ -199,3 +199,37 @@ def values_in(text: str) -> list[float]:
 
 def load_stat_index(force: bool = False) -> StatIndex:
     return StatIndex(fetch("stats", force=force))
+
+
+def base_type_names(force: bool = False) -> list[str]:
+    """Every craftable base type, uniques excluded, in trade-site order.
+
+    Entries carrying a ``name`` are unique items rather than bases - a unique
+    is priced by its name, not its rolls, so it has no place in a base survey.
+    """
+    data = fetch("items", force=force)
+    out: list[str] = []
+    seen: set[str] = set()
+    for group in data.get("result", []):
+        for entry in group.get("entries", []):
+            t = str(entry.get("type") or "").strip()
+            if t and not entry.get("name") and t.lower() not in seen:
+                seen.add(t.lower())
+                out.append(t)
+    return out
+
+
+def base_types(force: bool = False) -> set[str]:
+    """Every base type name the trade site knows, lowercased.
+
+    Used by ``validate-rules``: a misspelled base in the ruleset matches
+    nothing and fails silently, which is the failure mode that command exists
+    to catch.
+    """
+    data = fetch("items", force=force)
+    return {
+        str(entry["type"]).strip().lower()
+        for group in data.get("result", [])
+        for entry in group.get("entries", [])
+        if entry.get("type")
+    }

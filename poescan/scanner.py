@@ -239,6 +239,9 @@ def scan(
                     c.market.listings = _listings_from_payload(cached.payload)
                     c.from_cache = True
                     report.cache_hits += 1
+                    # Costs no API call, and salvages checks stored before
+                    # feature logging existed.
+                    cache.backfill_features(c.item.id, cfg.league, _features(c.verdict))
                     continue
                 if checked >= cap:
                     report.notes.append(
@@ -250,7 +253,7 @@ def scan(
                 say(f"Checking market for {c.item.label} ({checked + 1}/{min(cap, len(candidates))})"
                     + (f" - {left[0]} searches left in window" if left else ""))
                 c.market = trade.price_check(c.item, c.verdict)
-                cache.put_check(c.item.id, cfg.league, c.market)
+                cache.put_check(c.item.id, cfg.league, c.market, _features(c.verdict))
                 checked += 1
             report.market_checks = checked
 
@@ -258,6 +261,38 @@ def scan(
     candidates.sort(key=lambda c: -c.interest)
     report.candidates = candidates
     return report
+
+
+def _features(verdict: Verdict) -> dict:
+    """The item side of a price observation, for later calibration.
+
+    Every scan already pays for real market data; recording what the item
+    actually was turns that into evidence about which bases and mods carry
+    value, instead of the hand-authored priors the ruleset uses today.
+
+    Mods are stored in template form alongside the rolled value, because the
+    template is the unit rules match on and the value is what thresholds
+    compare. ``rules_hit`` is kept so a rule's score can later be checked
+    against what the items it fired on turned out to be worth.
+    """
+    it = verdict.item
+    return {
+        "base_type": it.base_type,
+        "category": it.category,
+        "ilvl": it.ilvl,
+        "influences": list(it.influences),
+        "corrupted": it.corrupted,
+        "fractured": it.fractured,
+        "synthesised": it.synthesised,
+        "sockets": it.sockets,
+        "links": it.links,
+        "quality": it.quality,
+        "triage_score": verdict.score,
+        "rules_hit": [h.rule_id for h in verdict.hits],
+        "mods": [
+            {"t": m.template, "id": m.stat_id, "v": m.value, "d": m.domain} for m in it.mods
+        ],
+    }
 
 
 def _listings_from_payload(payload: dict) -> list:
