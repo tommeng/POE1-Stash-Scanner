@@ -1,0 +1,149 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Commands
+
+```bash
+uv sync                                   # install
+uv run pytest                             # 158 tests, ~1s
+uv run pytest tests/test_ratelimit.py     # one file
+uv run pytest -k test_reduced_resolves    # one test by name
+uv run poescan validate-rules             # every mod string in the ruleset still maps to a real trade stat
+uvx ruff check poescan --select F,E9      # ruff is not configured in pyproject; invoke it explicitly
+```
+
+`uv run poescan diagnose --tabs "#16"` is the cheap way to see what the pipeline makes of a real
+stash: it reads items but makes **zero** trade API calls. Run it before any change that touches
+parsing or rules. `uv run poescan scan --no-verify` likewise skips the network entirely.
+
+## What this is
+
+Scans rare items in Path of Exile 1 dump tabs and ranks the ones worth a second look. It
+deliberately does **not** claim to price items — it decides what is worth a human glance.
+See `README.md` for user-facing setup.
+
+## Architecture
+
+Three stages, ordered by cost. The shape is forced by the trade API's rate limits
+(~30 searches / 5 min, 600 / 6 h), which make one API call per item impossible for a 600-slot tab.
+
+1. **Parse** (`stash.py` → `items.py` → `pseudo.py`). Stash JSON becomes a normalised `Item`:
+   category, ilvl, influence, and mods each resolved to a trade stat id. `pseudo.py` computes the
+   aggregates rares are actually priced on (total life including half-life from Strength, total
+   elemental resistance counting `all Elemental Resistances` three times).
+2. **Triage** (`triage.py` + `rules/default.yaml`). Free, offline scoring. Discards the obvious
+   nothing — roughly 73% of rares — so the API budget goes to the rest.
+3. **Market verification** (`trade.py`). Builds a trade search from the item's own rolls and reads
+   back the cheapest listings.
+
+`scanner.py` orchestrates and ranks; `report.py` renders HTML.
+
+### Triage scores are a filter, not a ranking
+
+This is the single most important thing to understand before changing scoring.
+
+Measured against a real dump tab, triage score had **no useful correlation with price**: the
+highest-scoring item (31) was worth 2c, while items scoring 12 ranged from 1c to 25c. What did
+track value was scarcity — 5–21 comparable listings meant 20–65c, while 500+ meant 1–2c.
+
+So `promote_score` is deliberately low (10), and `Candidate.interest` in `scanner.py` is dominated
+by the market result, with the triage score contributing only a small tiebreak. Unchecked items
+fall back to their triage score, which lands them mid-pack — ahead of confirmed junk, behind
+confirmed value.
+
+Do not "fix" this by raising `promote_score` to reduce noise. Doing that reintroduces false
+negatives, which is the failure mode that costs the user money. The relevant regression tests are
+`test_market_outranks_triage_score` and `test_scan_surfaces_every_valuable_item`.
+
+### Empirically established constants
+
+These were measured against the live API, not reasoned about. Changing them needs new measurement,
+not argument.
+
+- **`status: securable` (Instant Buyout) is the default and matters enormously.** On one wand:
+  `securable` gave 4126 listings / 90c median; `online` (In Person) gave 54 / 4c. The cheap
+  in-person listings are largely bait that never sells. The interest thresholds in `scanner.py`
+  are anchored to instant-buyout prices and would need retuning if `--status` changes.
+- **`sale_type: priced`** excludes listings with no price (they must be haggled over in whisper, so
+  they inflate the competition count while contributing nothing to a median).
+- **Confidence floor of 5 priced listings** (`MIN_CONFIDENT_SAMPLE`). Three unsold listings at
+  4 divine say "these did not sell", not "yours is worth 4 divine". High medians from thin samples
+  are damped in ranking and flagged in the report. The *junk* signal is deliberately not damped —
+  "thousands listed at 1c" is never a small-sample artifact.
+- **Queries are refined in both directions.** Zero results → widen to the single strongest mod
+  (a good item genuinely has no exact peers). Over 300 results → narrow using more of the item's
+  mods, because the cheapest of 8000 listings is the market floor, not a comparable.
+- **`LOW_SIGNAL_MOD` exists because magnitude is not importance.** Filling filter slots by roll size
+  put `+54 Accuracy Rating` above real mods and "priced" a 2c amulet at 570c against three
+  coincidental matches. Accuracy, light radius, mana regen, hybrid attributes etc. are excluded
+  when narrowing.
+
+### Mod text ↔ trade stat translation (`tradedata.py`)
+
+The game and the trade site word the same mod differently, in three systematic ways. All are
+handled in `_candidates()`, and all were found by running `diagnose` against a real stash
+(unresolved mods went from 4.3% to 0.1%):
+
+| game text | trade text |
+|---|---|
+| `42% increased Armour and Energy Shield` | `#% increased Armour and Energy Shield **(Local)**` |
+| `32% **reduced** Attribute Requirements` | `#% **increased** Attribute Requirements`, value negated |
+| `You can apply **an additional Curse**` | `You can apply **# additional Curses**` |
+
+`StatIndex.resolve()` returns `(stat_id, sign)`. **The sign is load-bearing** — a `reduced` roll
+must be stored negative or every threshold comparison silently inverts. `lookup()` is the
+convenience wrapper that discards it; prefer `resolve()` in new code.
+
+A mod that resolves to no stat id is invisible to both triage and trade search, so `diagnose`
+reports them. `Has N Abyssal Socket` is correctly unresolvable (a socket property, not a stat).
+
+### Rate limiting (`ratelimit.py`)
+
+Driven entirely by GGG's own `X-Rate-Limit` headers rather than hardcoded limits, because GGG
+changes them without notice. Rules are `hits:period:penalty`; exceeding one earns a **timed ban**,
+not a soft 429, so every bucket keeps one hit of headroom.
+
+The subtle part is `sync_from_headers`. A long window's count includes hits that are long past;
+stamping them all at `now` makes a 6-hour count of 32 look like 32 hits in the last 10 seconds and
+stalls the client for a full 300s. Backfilled hits are therefore placed just outside the previous
+(shorter) rule's window. `test_long_window_usage_does_not_stall_short_windows` pins this.
+
+`RateLimiter` takes injectable `clock` and `sleeper` so time-dependent behaviour is tested without
+real sleeps.
+
+### Auth: two paths (`auth.py`, `stash.py`, `Config.auth_mode`)
+
+- **OAuth** — public client, PKCE, loopback redirect. Preferred, but GGG's developer docs currently
+  state *"We are currently unable to process new applications"*, so a client id may be unobtainable.
+- **POESESSID** — `LegacyStashClient` against `character-window/get-stash-items`. Needs a
+  browser-like User-Agent (Cloudflare rejects bot agents), the account name with `#` percent-encoded,
+  and `realm=pc`. Its tab objects use short field names (`n`, `i`) unlike the OAuth API.
+
+`scanner.open_stash()` picks between them from `Config.auth_mode`; everything downstream is
+identical. Credentials are validated at setup time (`config.poesessid_problem`) because the
+failure mode otherwise is an opaque 403 — a POESESSID is exactly 32 hex characters, and people
+routinely paste `cf_clearance` instead. Never print the cookie; `setup` prints `set`, not the value.
+
+### Tab selection
+
+Tab names are frequently bare numbers and are **not unique** (real stashes have two tabs named
+`2`). `select_tabs` therefore prefers exact name match, supports `#20` for index, and only falls
+back to substring when nothing matched exactly. Special tabs (Currency, Maps, Gems…) cannot hold
+rare gear and are excluded unless named explicitly.
+
+## Tests
+
+- `tests/data/real_rings.json` holds ten rings scraped from live trade, all listed at 1 chaos.
+  They are the regression guard against the ruleset drifting loose. Re-run after any rule edit.
+- The `index` fixture downloads trade metadata to `~/.poescan/data` on first run, then is offline.
+- Fixtures in `tests/fixtures.py` mirror the real stash JSON shape, so they exercise the same
+  parsing path as live data.
+
+## Editing the ruleset
+
+`poescan/rules/default.yaml` is the domain knowledge and is meant to be edited as the meta moves.
+Mod strings are *templates* — rolled numbers replaced by `#`, exactly as the trade site writes them.
+`mod_matches` is tested against both the rolled text and the template, so patterns can be written
+either way. Add `abs: true` for mods that roll negative (`-7 to Total Mana Cost of Skills`).
+Always run `poescan validate-rules` after editing.

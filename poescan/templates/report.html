@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>poescan - {{ report.league }} - {{ generated }}</title>
+<style>
+  :root {
+    --bg: #0d0b08; --panel: #17130d; --panel2: #1f1a12; --line: #322920;
+    --text: #d6cbb2; --dim: #8a7d66; --rare: #ffff77; --magic: #8888ff;
+    --good: #7fbf5f; --warn: #d8a24a; --bad: #b4534a; --accent: #c9a227;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.5 "Segoe UI", system-ui, sans-serif; }
+  a { color: var(--accent); }
+  header { padding: 1.5rem 2rem; border-bottom: 1px solid var(--line);
+           background: linear-gradient(180deg, #1a150e, #0d0b08); }
+  h1 { margin: 0 0 .3rem; font-size: 1.35rem; color: var(--rare); font-weight: 600; }
+  .meta { color: var(--dim); font-size: .875rem; }
+  .stats { display: flex; flex-wrap: wrap; gap: 1.5rem; margin-top: .9rem; }
+  .stat b { display: block; font-size: 1.3rem; color: var(--text); font-weight: 600; }
+  .stat span { font-size: .75rem; color: var(--dim); text-transform: uppercase;
+               letter-spacing: .05em; }
+  main { padding: 1.5rem 2rem 4rem; max-width: 1100px; margin: 0 auto; }
+  .note { background: #241d12; border-left: 3px solid var(--warn); padding: .7rem 1rem;
+          margin-bottom: 1rem; font-size: .875rem; color: #cbb98f; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+          margin-bottom: 1rem; overflow: hidden; }
+  .card.tier-hot { border-color: #6b5a1e; box-shadow: 0 0 0 1px #6b5a1e33; }
+  .card-head { display: flex; justify-content: space-between; align-items: flex-start;
+               gap: 1rem; padding: .9rem 1.1rem; background: var(--panel2);
+               border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+  .name { color: var(--rare); font-weight: 600; font-size: 1.05rem; }
+  .base { color: var(--dim); font-size: .85rem; }
+  .where { font-size: .8rem; color: var(--dim); margin-top: .2rem; }
+  .score { text-align: right; white-space: nowrap; }
+  .score b { font-size: 1.4rem; color: var(--accent); }
+  .score span { display: block; font-size: .7rem; color: var(--dim);
+                text-transform: uppercase; letter-spacing: .05em; }
+  .body { display: grid; grid-template-columns: 1fr 1fr; gap: 1.1rem; padding: 1.1rem; }
+  @media (max-width: 760px) { .body { grid-template-columns: 1fr; } }
+  h3 { margin: 0 0 .5rem; font-size: .72rem; text-transform: uppercase;
+       letter-spacing: .08em; color: var(--dim); font-weight: 600; }
+  ul { margin: 0; padding-left: 1.1rem; }
+  li { margin-bottom: .2rem; }
+  .mods li { color: var(--magic); font-size: .9rem; }
+  .mods li.crafted { color: #b4b4ff; }
+  .mods li.implicit { color: #a89c85; }
+  .mods li.fractured { color: #a29162; }
+  .reasons li { font-size: .875rem; }
+  .tags { display: flex; gap: .35rem; flex-wrap: wrap; margin-top: .4rem; }
+  .tag { font-size: .68rem; padding: .12rem .45rem; border-radius: 3px;
+         background: #2a2317; color: #bda874; border: 1px solid #3d3322; }
+  .tag.inf { background: #2d2110; color: #d8a24a; }
+  .market { border-top: 1px solid var(--line); padding: .8rem 1.1rem;
+            background: #12100a; font-size: .875rem; }
+  .market .verdict { font-weight: 600; }
+  .v-good { color: var(--good); } .v-mid { color: var(--warn); } .v-bad { color: var(--bad); }
+  .comps { color: var(--dim); font-size: .8rem; margin-top: .35rem; }
+  table.comps-t { border-collapse: collapse; margin-top: .4rem; width: 100%;
+                  font-size: .8rem; color: var(--dim); }
+  table.comps-t td { padding: .15rem .5rem .15rem 0; }
+  .empty { text-align: center; color: var(--dim); padding: 3rem 1rem; }
+  footer { color: var(--dim); font-size: .8rem; padding: 0 2rem 3rem;
+           max-width: 1100px; margin: 0 auto; }
+</style>
+</head>
+<body>
+<header>
+  <h1>poescan &mdash; {{ report.candidates|length }} candidate{{ '' if report.candidates|length == 1 else 's' }}</h1>
+  <div class="meta">
+    League <b>{{ report.league }}</b> &middot;
+    tabs: {{ report.tabs_scanned|join(', ') or 'none' }} &middot;
+    generated {{ generated }} &middot; scan took {{ '%.0f'|format(report.duration) }}s
+  </div>
+  <div class="stats">
+    <div class="stat"><b>{{ report.total_items }}</b><span>items seen</span></div>
+    <div class="stat"><b>{{ report.rare_items }}</b><span>rares</span></div>
+    <div class="stat"><b>{{ report.candidates|length }}</b><span>flagged</span></div>
+    <div class="stat"><b>{{ report.market_checks }}</b><span>market checks</span></div>
+    <div class="stat"><b>{{ report.cache_hits }}</b><span>from cache</span></div>
+  </div>
+</header>
+
+<main>
+  {% for n in report.notes %}<div class="note">{{ n }}</div>{% endfor %}
+
+  {% if not report.candidates %}
+    <div class="empty">
+      <p>Nothing crossed the threshold in these tabs.</p>
+      <p style="font-size:.85rem">Lower <code>promote_score</code> in the ruleset to widen the net.</p>
+    </div>
+  {% endif %}
+
+  {% for c in report.candidates %}
+  {% set it = c.item %}
+  <div class="card {% if c.interest >= 55 %}tier-hot{% endif %}">
+    <div class="card-head">
+      <div>
+        <div class="name">{{ it.label }}</div>
+        <div class="base">{{ it.category_label }} &middot; item level {{ it.ilvl }}</div>
+        <div class="where">Tab <b>{{ it.tab_name }}</b> &middot; {{ it.position }}</div>
+        <div class="tags">
+          {% for inf in it.influences %}<span class="tag inf">{{ inf }}</span>{% endfor %}
+          {% if it.fractured %}<span class="tag">fractured</span>{% endif %}
+          {% if it.synthesised %}<span class="tag">synthesised</span>{% endif %}
+          {% if it.corrupted %}<span class="tag">corrupted</span>{% endif %}
+          {% if it.links >= 5 %}<span class="tag">{{ it.links }}-link</span>{% endif %}
+          {% if it.quality %}<span class="tag">{{ it.quality }}% quality</span>{% endif %}
+        </div>
+      </div>
+      <div class="score">
+        <b>{{ '%.0f'|format(c.interest) }}</b>
+        <span>interest</span>
+      </div>
+    </div>
+
+    <div class="body">
+      <div>
+        <h3>Why it was flagged</h3>
+        <ul class="reasons">
+          {% for h in c.verdict.hits|sort(attribute='score', reverse=true) %}
+            {% if h.note %}<li>{{ h.note }} <span style="color:var(--dim)">(+{{ '%.0f'|format(h.score) }})</span></li>{% endif %}
+          {% endfor %}
+        </ul>
+        {% set p = c.verdict.pseudo %}
+        <h3 style="margin-top:.9rem">Totals</h3>
+        <ul class="reasons" style="color:var(--dim)">
+          {% if p.effective_life %}<li>Life {{ '%.0f'|format(p.effective_life) }}</li>{% endif %}
+          {% if p.energy_shield %}<li>Energy shield {{ '%.0f'|format(p.energy_shield) }}</li>{% endif %}
+          {% if p.elemental_resistance %}<li>Elemental res {{ '%.0f'|format(p.elemental_resistance) }}%{% if p.chaos_resistance %}, chaos {{ '%.0f'|format(p.chaos_resistance) }}%{% endif %}</li>{% endif %}
+          {% if p.total_attributes %}<li>Attributes {{ '%.0f'|format(p.total_attributes) }}</li>{% endif %}
+        </ul>
+      </div>
+
+      <div>
+        <h3>Mods</h3>
+        <ul class="mods">
+          {% for m in it.mods %}
+            {% if m.domain != 'enchant' %}
+            <li class="{{ m.domain }}">{{ m.text }}{% if m.domain == 'crafted' %} <span style="color:var(--dim)">(crafted)</span>{% elif m.domain == 'implicit' %} <span style="color:var(--dim)">(implicit)</span>{% elif m.domain == 'fractured' %} <span style="color:var(--dim)">(fractured)</span>{% endif %}</li>
+            {% endif %}
+          {% endfor %}
+        </ul>
+      </div>
+    </div>
+
+    {% if c.market %}
+    <div class="market">
+      {% set m = c.market %}
+      {% if m.error %}
+        <span class="verdict v-mid">Market check unavailable</span>
+        <span style="color:var(--dim)"> &mdash; {{ m.error }}</span>
+      {% elif m.total == 0 %}
+        <span class="verdict v-mid">No comparable listings</span>
+        <span style="color:var(--dim)"> &mdash; either genuinely rare, or the filters were too tight. Worth eyeballing.</span>
+      {% else %}
+        {% set med = m.median %}
+        <span class="verdict {% if med and med >= 80 and m.confident %}v-good{% elif med and med >= 25 %}v-mid{% else %}v-bad{% endif %}">
+          {{ m.total }} similar listed{% if med %} &middot; cheapest {{ '%.0f'|format(m.cheapest) }}c &middot; median {{ '%.0f'|format(med) }}c{% endif %}
+        </span>
+        {% if m.total > 300 %}
+          <span style="color:var(--dim)">&mdash; that many comparable items means this one is common; the price shown is the market floor, not a valuation.</span>
+        {% elif not m.confident %}
+          <span style="color:var(--warn)">&mdash; only {{ m.priced|length }} priced comparables. Treat with suspicion: a few unsold listings at a high price usually means they did not sell, not that yours is worth that.</span>
+        {% endif %}
+      {% endif %}
+      {% if m.filters_used %}
+        <div class="comps">
+          Compared on: {{ m.filters_used|join(' &middot; ')|safe }}
+          {% if m.relaxed %}<em>(no exact peers listed &mdash; widened to the strongest mod alone)</em>{% endif %}
+          {% if m.tightened %}<em>(too many loose matches &mdash; narrowed using more of this item's mods)</em>{% endif %}
+        </div>
+      {% endif %}
+      {% if m.query_url %}
+        <div class="comps"><a href="{{ m.query_url }}" target="_blank" rel="noopener">Open this search on the trade site &rarr;</a>{% if c.from_cache %} <span>(cached result)</span>{% endif %}</div>
+      {% endif %}
+    </div>
+    {% endif %}
+  </div>
+  {% endfor %}
+</main>
+
+<footer>
+  Prices are what sellers <em>ask</em>, not what items sell for &mdash; treat them as an upper bound and a
+  relative signal. Flagged items still need your judgement; this only decides what is worth looking at.
+</footer>
+</body>
+</html>

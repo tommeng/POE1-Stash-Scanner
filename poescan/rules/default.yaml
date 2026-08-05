@@ -1,0 +1,422 @@
+# poescan triage ruleset - "balanced" tuning.
+#
+# Scores are additive. An item is promoted to market verification once it
+# reaches `promote_score`. The intent of the balanced tuning is that a single
+# ordinary attribute (just life, just resists) is NOT enough - an item needs
+# either two good axes at once, or one genuinely rare mod.
+#
+# Tuning:
+#   too many results -> raise promote_score (30-35) or the `min:` thresholds
+#   missing things   -> lower promote_score (18-20)
+#
+# Mod strings are "templates": the rolled numbers replaced by #. They must
+# match GGG's trade stat text exactly - run `poescan validate-rules` to check.
+
+version: 1
+
+settings:
+  # Below ilvl 60 the mod tiers that make an item worth listing cannot roll.
+  min_ilvl: 60
+  # Deliberately low. Measured against a real dump tab, the triage score does
+  # not predict price - items worth 20-65c scored 12-24, while the top-scoring
+  # item (31) was worth 2c. Rules are therefore used only to discard the
+  # obvious nothing (the 0-10 band, ~73% of rares); the market decides the
+  # rest. A 130-rare tab yields ~25 checks, which fits the API budget easily.
+  promote_score: 10
+  # Ceiling on trade API calls per scan. ~600 searches are available per 6h and
+  # a check costs 1-2, so this comfortably covers several dump tabs.
+  max_market_checks: 120
+
+# ---------------------------------------------------------------------------
+# Hard rejects, evaluated before scoring.
+# ---------------------------------------------------------------------------
+veto:
+  - id: mirrored
+    note: "mirrored - cannot be traded"
+    all:
+      - {flag: mirrored}
+
+  - id: low-ilvl-jewellery
+    note: "ilvl too low for meaningful jewellery tiers"
+    categories: [accessory.ring, accessory.amulet, accessory.belt]
+    all:
+      - {ilvl: {max: 74}}
+      - {flag: influenced, is: false}
+      - {flag: fractured, is: false}
+
+# ---------------------------------------------------------------------------
+# Universal signals - apply to every rare regardless of slot.
+# ---------------------------------------------------------------------------
+rules:
+  - id: influenced
+    score: 14
+    note: "Influenced base - can roll build-defining mods"
+    all:
+      - {flag: influenced}
+
+  - id: double-influenced
+    score: 12
+    note: "Double-influenced - rare crafting base"
+    all:
+      - {influence_count: {min: 2}}
+
+  - id: fractured
+    score: 16
+    note: "Fractured - sought after as a crafting base"
+    all:
+      - {flag: fractured}
+
+  - id: synthesised
+    score: 16
+    note: "Synthesised - special implicits"
+    all:
+      - {flag: synthesised}
+
+  # ilvl is not a value signal by itself - it only permits high mod tiers, and
+  # those are scored directly where they roll. It counts only on bases whose
+  # worth IS the base: influenced and fractured items get crafted on.
+  - id: ilvl-86-craft-base
+    score: 5
+    note: "ilvl 86+ crafting base"
+    all:
+      - {ilvl: {min: 86}}
+    any:
+      - {flag: influenced}
+      - {flag: fractured}
+      - {flag: synthesised}
+
+  # Defensive stats are deliberately scored low. Life+resists is the baseline
+  # every rare has; on its own it is a 1-chaos item however well it rolled.
+  # These scores are sized so defence alone tops out below promote_score, and
+  # only tips over when combined with an offensive or utility mod.
+  - id: high-life
+    score: 7
+    note: "High life roll"
+    exclude_categories: [jewel.base, jewel.abyss, jewel.cluster, flask]
+    all:
+      - {pseudo: life, min: 90}
+
+  - id: very-high-life
+    score: 5
+    note: "Near top-tier life"
+    exclude_categories: [jewel.base, jewel.abyss, jewel.cluster, flask]
+    all:
+      - {pseudo: life, min: 115}
+
+  - id: triple-res
+    score: 5
+    note: "Covers all three elemental resistances"
+    all:
+      - {pseudo: count_elemental_resistances, min: 3}
+      - {pseudo: elemental_resistance, min: 100}
+
+  - id: high-total-res
+    score: 6
+    note: "High total resistance"
+    all:
+      - {pseudo: total_resistance, min: 130}
+
+  - id: huge-total-res
+    score: 6
+    note: "Exceptional total resistance"
+    all:
+      - {pseudo: total_resistance, min: 160}
+
+  - id: chaos-res
+    score: 7
+    note: "Meaningful chaos resistance"
+    all:
+      - {pseudo: chaos_resistance, min: 25}
+
+  - id: attribute-stacking
+    score: 10
+    note: "Large attribute total - attribute-stacking builds pay for this"
+    all:
+      - {pseudo: attributes, min: 70}
+
+  # This mod rolls negative, so it is compared on absolute value.
+  - id: minus-mana-cost
+    score: 26
+    note: "Reduced total mana cost - always in demand"
+    all:
+      - {mod_any: ["-# to Total Mana Cost of Skills", "# to Total Mana Cost of Skills"], min: 4, abs: true}
+
+  # -------------------------------------------------------------------------
+  # Rings
+  # -------------------------------------------------------------------------
+  - id: ring-spell-gem-level
+    score: 30
+    note: "+1 spell gem levels on a ring - Shaper mod, high value"
+    categories: [accessory.ring]
+    all:
+      - {mod_matches: "\\+# to Level of all .*Spell Skill Gems", min: 1}
+
+  # Thresholds are near-top-tier averages, not merely "present". A mid roll of
+  # flat damage on an otherwise ordinary ring is not what sells it.
+  - id: ring-added-attack-damage
+    score: 14
+    note: "Near top-tier flat added attack damage"
+    categories: [accessory.ring, accessory.amulet, armour.quiver, weapon.bow]
+    any:
+      - {mod: "Adds # to # Physical Damage to Attacks", min: 11}
+      - {mod: "Adds # to # Fire Damage to Attacks", min: 40}
+      - {mod: "Adds # to # Cold Damage to Attacks", min: 35}
+      - {mod: "Adds # to # Lightning Damage to Attacks", min: 45}
+
+  - id: ring-curse-on-hit
+    score: 22
+    note: "Curse on hit ring"
+    categories: [accessory.ring]
+    all:
+      - {mod_matches: "Curse Enemies with .* on Hit"}
+
+  - id: ring-elemental-damage
+    score: 12
+    note: "High elemental damage with attacks"
+    categories: [accessory.ring, accessory.amulet, accessory.belt]
+    all:
+      - {mod: "#% increased Elemental Damage with Attack Skills", min: 25}
+
+  # -------------------------------------------------------------------------
+  # Amulets
+  # -------------------------------------------------------------------------
+  - id: amulet-gem-level
+    score: 30
+    note: "+1 or more gem levels on an amulet"
+    categories: [accessory.amulet]
+    all:
+      - {mod_matches: "\\+# to Level of all .*(Skill Gems)", min: 1}
+
+  - id: amulet-crit-multi
+    score: 14
+    note: "High global crit multiplier"
+    categories: [accessory.amulet, accessory.ring, jewel.base, jewel.abyss]
+    all:
+      - {mod: "+#% to Global Critical Strike Multiplier", min: 25}
+
+  - id: amulet-life-crit
+    score: 10
+    note: "Life plus crit - caster/attacker amulet shell"
+    categories: [accessory.amulet]
+    all:
+      - {pseudo: life, min: 80}
+      - {mod_matches: "Critical Strike (Multiplier|Chance)", min: 20}
+
+  # -------------------------------------------------------------------------
+  # Belts
+  # -------------------------------------------------------------------------
+  - id: belt-increased-life
+    score: 16
+    note: "% increased maximum Life on belt - Crusader mod"
+    categories: [accessory.belt]
+    all:
+      - {mod: "#% increased maximum Life", min: 4}
+
+  - id: belt-flask-mods
+    score: 10
+    note: "Flask effect/duration belt"
+    categories: [accessory.belt]
+    any:
+      - {mod: "#% increased Flask Effect Duration", min: 20}
+      - {mod: "#% increased Flask Charges gained", min: 20}
+
+  # -------------------------------------------------------------------------
+  # Boots
+  # -------------------------------------------------------------------------
+  - id: boots-movespeed-30
+    score: 12
+    note: "30% movement speed"
+    categories: [armour.boots]
+    all:
+      - {mod: "#% increased Movement Speed", min: 30}
+
+  - id: boots-movespeed-35
+    score: 12
+    note: "35% movement speed - top tier"
+    categories: [armour.boots]
+    all:
+      - {mod: "#% increased Movement Speed", min: 35}
+
+  - id: boots-tailwind
+    score: 32
+    note: "Tailwind boots - Hunter influence, consistently valuable"
+    categories: [armour.boots]
+    all:
+      - {mod_matches: "Tailwind"}
+
+  - id: boots-elusive
+    score: 26
+    note: "Elusive on crit - Redeemer boots"
+    categories: [armour.boots]
+    all:
+      - {mod_matches: "Elusive"}
+
+  # -------------------------------------------------------------------------
+  # Helmets
+  # -------------------------------------------------------------------------
+  - id: helm-enemy-res
+    score: 30
+    note: "Nearby enemies have reduced resistance - top helmet mod"
+    categories: [armour.helmet]
+    all:
+      - {mod_matches: "Nearby Enemies have -#% to .* Resistance"}
+
+  - id: helm-socketed-gem-level
+    score: 22
+    note: "+2 to socketed gem levels"
+    categories: [armour.helmet]
+    all:
+      - {mod_matches: "\\+# to Level of Socketed .*Gems", min: 2}
+
+  - id: helm-supported-by
+    score: 14
+    note: "Socketed gems supported by a meaningful support"
+    categories: [armour.helmet, armour.gloves, armour.chest]
+    all:
+      - {mod_matches: "Socketed Gems are Supported by Level #", min: 15}
+
+  # -------------------------------------------------------------------------
+  # Gloves
+  # -------------------------------------------------------------------------
+  - id: gloves-attack-speed
+    score: 10
+    note: "Attack speed on gloves"
+    categories: [armour.gloves]
+    all:
+      - {mod: "#% increased Attack Speed", min: 12}
+
+  - id: gloves-trigger
+    score: 24
+    note: "Trigger mod on gloves"
+    categories: [armour.gloves, weapon.wand, weapon.sceptre, weapon.dagger, weapon.runedagger]
+    all:
+      - {mod_matches: "Trigger a Socketed"}
+
+  # -------------------------------------------------------------------------
+  # Body armour
+  # -------------------------------------------------------------------------
+  - id: chest-six-link
+    score: 20
+    note: "6-linked"
+    categories: [armour.chest]
+    all:
+      - {links: {min: 6}}
+
+  - id: chest-increased-life
+    score: 14
+    note: "% increased maximum Life on chest"
+    categories: [armour.chest]
+    all:
+      - {mod: "#% increased maximum Life", min: 5}
+
+  - id: chest-socketed-gem-level
+    score: 24
+    note: "+1 to level of socketed gems on chest"
+    categories: [armour.chest]
+    all:
+      - {mod_matches: "\\+# to Level of Socketed .*Gems", min: 1}
+
+  # -------------------------------------------------------------------------
+  # Shields
+  # -------------------------------------------------------------------------
+  - id: shield-spell-damage
+    score: 14
+    note: "High spell damage shield"
+    categories: [armour.shield]
+    all:
+      - {mod_matches: "#% increased Spell Damage", min: 60}
+
+  - id: shield-block
+    score: 12
+    note: "High block chance"
+    categories: [armour.shield]
+    all:
+      - {mod_matches: "Chance to Block", min: 5}
+
+  # -------------------------------------------------------------------------
+  # Caster weapons
+  # -------------------------------------------------------------------------
+  - id: caster-gem-level
+    score: 30
+    note: "+1 or better to spell gem levels"
+    categories: [weapon.wand, weapon.sceptre, weapon.dagger, weapon.runedagger, weapon.staff, weapon.warstaff]
+    all:
+      - {mod_matches: "\\+# to Level of all .*Spell Skill Gems", min: 1}
+
+  - id: caster-spell-damage
+    score: 12
+    note: "High spell damage"
+    categories: [weapon.wand, weapon.sceptre, weapon.dagger, weapon.runedagger, weapon.staff, weapon.warstaff]
+    all:
+      - {mod_matches: "#% increased Spell Damage", min: 80}
+
+  - id: caster-crit-package
+    score: 14
+    note: "Spell crit chance plus multiplier"
+    categories: [weapon.wand, weapon.sceptre, weapon.dagger, weapon.runedagger, weapon.staff, weapon.warstaff]
+    all:
+      - {mod: "#% increased Spell Critical Strike Chance", min: 60}
+      - {mod: "+#% to Global Critical Strike Multiplier", min: 20}
+
+  - id: caster-cast-speed
+    score: 8
+    note: "Cast speed"
+    categories: [weapon.wand, weapon.sceptre, weapon.dagger, weapon.runedagger, weapon.staff, weapon.warstaff]
+    all:
+      - {mod: "#% increased Cast Speed", min: 15}
+
+  # -------------------------------------------------------------------------
+  # Attack weapons
+  # -------------------------------------------------------------------------
+  - id: weapon-phys-damage
+    score: 16
+    note: "High local physical damage"
+    categories: [weapon.onesword, weapon.oneaxe, weapon.onemace, weapon.twosword, weapon.twoaxe, weapon.twomace, weapon.bow, weapon.claw, weapon.dagger]
+    all:
+      - {mod: "#% increased Physical Damage", min: 150}
+
+  - id: weapon-phys-damage-top
+    score: 12
+    note: "Top-tier local physical damage"
+    categories: [weapon.onesword, weapon.oneaxe, weapon.onemace, weapon.twosword, weapon.twoaxe, weapon.twomace, weapon.bow, weapon.claw, weapon.dagger]
+    all:
+      - {mod: "#% increased Physical Damage", min: 250}
+
+  - id: weapon-attack-speed
+    score: 10
+    note: "Attack speed on weapon"
+    categories: [weapon.onesword, weapon.oneaxe, weapon.onemace, weapon.twosword, weapon.twoaxe, weapon.twomace, weapon.bow, weapon.claw, weapon.dagger, weapon.wand]
+    all:
+      - {mod: "#% increased Attack Speed", min: 13}
+
+  - id: weapon-crit-multi
+    score: 10
+    note: "Global crit multiplier on weapon"
+    categories: [weapon.onesword, weapon.oneaxe, weapon.onemace, weapon.twosword, weapon.twoaxe, weapon.twomace, weapon.bow, weapon.claw, weapon.dagger, weapon.wand]
+    all:
+      - {mod: "+#% to Global Critical Strike Multiplier", min: 25}
+
+  # -------------------------------------------------------------------------
+  # Jewels
+  # -------------------------------------------------------------------------
+  - id: abyss-jewel-package
+    score: 16
+    note: "Abyss jewel with life plus added damage"
+    categories: [jewel.abyss]
+    all:
+      - {pseudo: flat_life, min: 35}
+      - {mod_matches: "Adds # to # .* Damage"}
+
+  - id: cluster-jewel
+    score: 14
+    note: "Cluster jewel - check the notables"
+    categories: [jewel.cluster]
+    all:
+      - {ilvl: {min: 68}}
+
+  - id: jewel-multi-damage
+    score: 12
+    note: "Jewel with stacked damage modifiers"
+    categories: [jewel.base]
+    all:
+      - {mod_matches: "#% increased .*Damage", min: 14}
