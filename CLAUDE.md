@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 uv sync                                   # install
-uv run pytest                             # 258 tests, ~3.8s (fully offline)
+uv run pytest                             # 273 tests, ~3.9s (fully offline)
 uv run pytest tests/test_ratelimit.py     # one file
 uv run pytest -k test_reduced_resolves    # one test by name
 uv run poescan validate-rules             # every mod string and base name in the ruleset really exists
@@ -119,7 +119,10 @@ worth something as mutual validation, but poe.ninja's magnitudes run lower and i
 10–100× larger. It is the same underlying stash data, better aggregated — not a second opinion.
 
 The survey's "not sold as a base" rows were an artifact of that thinness, not signal: Sapphire and
-Iron Rings showed n=0 live while poe.ninja records 385 and 152 listings at 1c. A zero from a thin
+Iron Rings showed n=0 live while poe.ninja samples 385 and 152 of them at 1c. Note that
+poe.ninja's `count` is a **capped sample** (it saturates at 399), not a listing count —
+`ninja.py` exposes it as `samples` with `listings` alongside, because reading one as the other
+reintroduces exactly the saturating-denominator error that killed the survey's third design. A zero from a thin
 sample is still a thin sample. `TradeClient.base_value` is kept as the independent spot-check.
 
 ### Mod text ↔ trade stat translation (`tradedata.py`)

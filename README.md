@@ -225,8 +225,10 @@ uv run poescan survey-bases --category accessory.ring --ilvl 84 --influence shap
 request covering every slot, cached for a day. `survey-bases` measures the same thing directly from
 GGG's trade API, one search per base. Use the first for numbers and the second to spot-check them:
 they agree on ordering, but poe.ninja's samples are 10–100× larger, because a snapshot of what is
-*listed right now* is very thin. Both apply a five-listing confidence floor — a single listed
-Helical Ring reported 30,510 chaos.
+*listed right now* is very thin. Both apply a five-sample confidence floor — a single sampled Helical Ring reported 30,510
+chaos. Note poe.ninja's sample count caps at 399, so `base-values` shows samples and market
+listings as separate columns; reading one as the other is how a saturating denominator sneaks
+back in.
 
 ## Rate limits
 
@@ -342,7 +344,7 @@ being an anecdote.
 ## Development
 
 ```bash
-uv run pytest                             # 258 tests, ~3.8s
+uv run pytest                             # 273 tests, ~3.9s
 uv run pytest tests/test_ratelimit.py     # one file
 uv run pytest -k test_reduced_resolves    # one test
 uvx ruff check poescan --select F,E9

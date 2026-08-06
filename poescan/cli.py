@@ -645,6 +645,9 @@ def cmd_refresh_data(args) -> int:
 # The trade API stops counting here; a total at the cap is a floor, not a total.
 _API_RESULT_CAP = 10000
 
+# poe.ninja's `count` saturates here. Anything at the cap is a lower bound.
+NINJA_SAMPLE_CAP = 399
+
 
 def _median(values) -> float | None:
     vals = sorted(v for v in values if v is not None)
@@ -777,6 +780,11 @@ def cmd_base_values(args) -> int:
             for t in ninja.item_types(league):
                 console.print(f"  {t}")
             return 0
+        if args.influences:
+            for i in ninja.influences(league):
+                console.print(f"  {i}")
+            console.print("  [dim]None[/]  (uninfluenced)")
+            return 0
         rows = ninja.base_values(
             league,
             item_type=args.slot,
@@ -789,8 +797,11 @@ def cmd_base_values(args) -> int:
         return _err(str(e))
 
     if not rows:
-        console.print("[yellow]Nothing matched those filters.[/] "
-                      "Try --slots to list the slots available.")
+        console.print(
+            "[yellow]No rows matched.[/] The filters are all valid, so this is a real "
+            "empty result.\n"
+            f"Note the data only covers item levels 82-86{'' if not args.ilvl else f' - --ilvl {args.ilvl} may be outside that'}."
+        )
         return 0
 
     scope = " / ".join(
@@ -804,27 +815,34 @@ def cmd_base_values(args) -> int:
     table.add_column("slot", style="dim")
     table.add_column("influence", style="dim")
     table.add_column("ilvl", justify="right")
+    # `samples` is what the price was computed from and caps at 399; `listings`
+    # is the market. Showing both stops one being read as the other.
+    table.add_column("samples", justify="right")
     table.add_column("listings", justify="right")
     table.add_column("value", justify="right")
 
-    baseline = _median([r.chaos for r in rows if r.confident])
+    baseline = _median([r.chaos for r in rows])
     for r in rows[: args.top]:
-        value = f"{r.chaos:,.0f}c" if r.chaos < 1000 else f"{r.divine:,.1f}div"
+        value = _price_cell(r.chaos, baseline) if r.chaos < 1000 else f"[green]{r.divine:,.1f}div[/]"
+        samples = str(r.samples) + ("+" if r.samples >= NINJA_SAMPLE_CAP else "")
         table.add_row(
             r.name,
             r.item_type,
             r.influence or "-",
             str(r.ilvl),
-            f"{r.count}" if r.confident else f"[yellow]{r.count}[/]",
-            _price_cell(r.chaos, baseline) if r.confident else f"[dim]{value} (n={r.count})[/]",
+            samples if r.confident else f"[yellow]{samples}[/]",
+            f"{r.listings:,}",
+            value,
         )
     console.print(table)
 
-    thin = len([r for r in rows if not r.confident])
+    shown = min(args.top, len(rows))
     console.print(
-        f"\n[dim]{len(rows)} rows matched, {thin} below the {MIN_CONFIDENT_SAMPLE}-listing "
-        "confidence floor and shown dimmed - a single listing sets its own price, and one\n"
-        "listed Helical Ring reported 30510c. Rows are per base, influence and item level.\n"
+        f"\n[dim]{len(rows)} rows matched, showing {shown}. Rows below "
+        f"{args.min_samples} samples are hidden entirely - pass --min-samples 0 to see them,\n"
+        "but a single sampled Helical Ring reported 30510c, so they are noise rather than\n"
+        f"cheap data. A samples figure of {NINJA_SAMPLE_CAP}+ is poe.ninja's cap, not the\n"
+        "market size - read the listings column for that.\n"
         "Same underlying stash data as the trade API, better aggregated - not a second opinion.[/]"
     )
     return 0
@@ -1055,6 +1073,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     s.add_argument("--slot", help='item class, e.g. "Ring", "Body Armour"')
     s.add_argument("--slots", action="store_true", help="list the slots available and exit")
+    s.add_argument(
+        "--influences", action="store_true", help="list the influences available and exit"
+    )
     s.add_argument("--influence", help='e.g. Shaper, "Shaper/Elder", or None for uninfluenced')
     s.add_argument("--ilvl", type=int, help="only rows at or above this item level")
     s.add_argument(
