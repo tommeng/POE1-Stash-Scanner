@@ -71,12 +71,20 @@ class Bucket:
         cutoff = now - horizon
         self.timestamps = [t for t in self.timestamps if t > cutoff]
 
-    def delay_until_free(self, now: float | None = None) -> float:
-        """Seconds to wait before the next request is safe. 0 means go now."""
+    def binding(self, now: float | None = None) -> "tuple[float, Rule | None, int]":
+        """``(seconds to wait, the rule that forces it, hits counted against it)``.
+
+        The rule is what makes a wait explicable rather than a hang: "99 of 99
+        used in a 30 minute window" is correct behaviour, and looks it. It is
+        ``None`` when the wait comes from a ban rather than from a rule, since
+        a ban is imposed by GGG and no local count explains it.
+        """
         now = self.clock() if now is None else now
         with self._lock:
             self._prune(now)
             wait = max(0.0, self.blocked_until - now)
+            worst: Rule | None = None
+            used = 0
             for rule in self.rules:
                 budget = max(1, rule.hits - self.headroom)
                 in_window = sorted(t for t in self.timestamps if t > now - rule.period)
@@ -84,8 +92,13 @@ class Bucket:
                     # Enough hits must age out to bring us back under budget;
                     # that happens when in_window[n - budget] leaves the window.
                     expires = in_window[len(in_window) - budget] + rule.period
-                    wait = max(wait, expires - now)
-            return wait
+                    if expires - now > wait:
+                        wait, worst, used = expires - now, rule, len(in_window)
+            return wait, worst, used
+
+    def delay_until_free(self, now: float | None = None) -> float:
+        """Seconds to wait before the next request is safe. 0 means go now."""
+        return self.binding(now)[0]
 
     def record(self, now: float | None = None) -> None:
         now = self.clock() if now is None else now
@@ -149,6 +162,60 @@ class Bucket:
             return worst
 
 
+def humanize(seconds: float) -> str:
+    """``330`` -> ``5m30s``. Larger units drop an empty remainder; seconds are bare.
+
+    Hours are not decoration: the trade ip policy includes a 21600-second rule,
+    and "360m" in a message whose whole job is to be legible at a glance is a
+    division the reader should not have to do.
+    """
+    total = int(seconds + 0.5)
+    if total < 60:
+        return f"{total}s"
+    if total < 3600:
+        minutes, rest = divmod(total, 60)
+        return f"{minutes}m{rest}s" if rest else f"{minutes}m"
+    hours, rest = divmod(total, 3600)
+    return f"{hours}h{humanize(rest)}" if rest else f"{hours}h"
+
+
+@dataclass(frozen=True)
+class WaitStatus:
+    """Why a request is being held back, reported while it is being held back.
+
+    A scan that correctly waits out a 30-minute stash window is indistinguishable
+    from one that has hung, unless it says so. This carries enough to explain
+    itself: how long is left, and which rule is responsible.
+
+    ``used`` is counted against ``limit``, GGG's own advertised allowance, and
+    **it can legitimately exceed it**. Limits are per-account and per-IP, so a
+    shared IP, a VPN, or a trade overlay running alongside a scan all put hits
+    on the clock that this process never made; ``_merge_policies`` keeps the
+    tightest rule next to the most pessimistic count, and those can come from
+    different rule sets. Phrasing it as a fraction of our own headroom-reduced
+    budget rendered that as "40/29 used", which reads as us having blown through
+    a limit - the one thing that earns a ban, and the one thing that had not
+    happened. "counted in the last" says whose count it is without claiming it
+    is all ours.
+    """
+
+    remaining: float
+    waited: float
+    used: int = 0
+    limit: int = 0
+    period: float = 0.0
+
+    def describe(self) -> str:
+        head = f"waiting {humanize(self.remaining)} for rate limit"
+        if not self.period:
+            # No local count explains a ban; quoting one would invent it.
+            return f"{head} (banned by the server)"
+        return (
+            f"{head} ({self.used} requests counted in the last "
+            f"{humanize(self.period)}, limit {self.limit})"
+        )
+
+
 def _pick(headers, *names: str) -> str | None:
     for n in names:
         v = headers.get(n)
@@ -210,6 +277,9 @@ class RateLimiter:
         self._lock = threading.Lock()
         self._clock = clock
         self._sleeper = sleeper
+        # Set after construction, not here: the scanner only knows what to say
+        # about a wait once it knows which tab it is reading. See `wait`.
+        self.on_wait = None
         self._state_path = Path(state_path) if state_path else None
         self._last_saved = 0.0
         if self._state_path:
@@ -298,17 +368,40 @@ class RateLimiter:
             return self._buckets[policy]
 
     def wait(self, policy: str, sleeper=None) -> float:
-        """Block until a request under ``policy`` is safe. Returns seconds waited."""
+        """Block until a request under ``policy`` is safe. Returns seconds waited.
+
+        ``self.on_wait``, when set, is called with a ``WaitStatus`` before each
+        nap, so a caller can keep a spinner honest about a wait that may run to
+        half an hour. It is an attribute rather than an argument threaded through
+        here because the limiter is already the one object shared by the stash
+        and trade clients, and neither of them has any other use for a progress
+        callback. It is expected to be scoped to one operation - ``scan()``
+        builds its own limiter - since nothing clears it.
+        """
         sleep = sleeper or self._sleeper
         b = self.bucket(policy)
         total = 0.0
         while True:
-            d = b.delay_until_free()
+            d, rule, used = b.binding()
             if d <= 0:
                 b.record()
                 return total
-            # Cap each nap so a long ban still surfaces progress to the caller.
+            # Cap each nap so a long wait keeps reporting progress rather than
+            # going silent for its whole duration.
             chunk = min(d, 5.0)
+            if self.on_wait:
+                self.on_wait(
+                    WaitStatus(
+                        remaining=d,
+                        waited=total,
+                        used=used,
+                        # GGG's advertised allowance, not our headroom-reduced
+                        # budget: the headroom is our caution and reporting it
+                        # as the limit would misattribute it to them.
+                        limit=rule.hits if rule else 0,
+                        period=rule.period if rule else 0.0,
+                    )
+                )
             sleep(chunk)
             total += chunk
 

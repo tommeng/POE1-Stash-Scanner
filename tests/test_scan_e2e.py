@@ -193,6 +193,57 @@ def test_flooded_market_pushes_item_below_its_triage_score(stubbed, cfg, index):
     assert amulet.interest < amulet.verdict.score
 
 
+def test_a_rate_limit_wait_says_which_tab_it_is_holding_up(stubbed, cfg, index, monkeypatch):
+    """Waiting out the stash window is correct, and silent it looks like a hang.
+
+    Pins the whole chain, because each half of it is useless alone: the limiter
+    must report while it waits rather than after, and the scanner must name what
+    the wait is blocking. A frozen "Reading tab 'dump1'" for seven minutes is
+    what this exists to prevent.
+    """
+    from poescan import ratelimit
+
+    class FakeClock:
+        def __init__(self):
+            self.t = 1000.0
+
+        def __call__(self):
+            return self.t
+
+        def sleep(self, seconds):
+            self.t += seconds
+
+    clock = FakeClock()
+    limiters: list = []
+
+    class TestLimiter(ratelimit.RateLimiter):
+        def __init__(self, **kw):
+            super().__init__(clock=clock, sleeper=clock.sleep, state_path=None)
+            # 2 hits per 60s means budget 1: the second read blocks a full minute.
+            self.bucket("stash").rules = ratelimit._parse_rules("2:60:60")
+            limiters.append(self)
+
+    monkeypatch.setattr(scanner, "RateLimiter", TestLimiter)
+
+    class ThrottledStash(FakeStash):
+        def tab_items(self, tab, index_):
+            limiters[0].wait("stash")
+            limiters[0].wait("stash")  # blocks
+            return super().tab_items(tab, index_)
+
+    monkeypatch.setattr(scanner, "StashClient", ThrottledStash)
+
+    said: list[str] = []
+    scan(cfg, token=None, index=index, ruleset=Ruleset.load(),
+         tabs_wanted=["dump1"], verify=False, progress=said.append)
+
+    waits = [m for m in said if "rate limit" in m]
+    assert waits, "a minute-long wait must not pass in silence"
+    assert all("dump1" in m for m in waits), "a wait must name what it is holding up"
+    assert "1 requests counted in the last 1m, limit 2" in waits[0], "and why it is waiting"
+    assert len(waits) > 1, "one message at the start is a frozen spinner, not progress"
+
+
 def test_no_verify_skips_the_trade_api(stubbed, cfg, index):
     rep = scan(cfg, token=None, index=index, ruleset=Ruleset.load(),
                tabs_wanted=["dump1"], verify=False)

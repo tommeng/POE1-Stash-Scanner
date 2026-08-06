@@ -224,6 +224,31 @@ stalls the client for a full 300s. Backfilled hits are therefore placed just out
 `RateLimiter` takes injectable `clock` and `sleeper` so time-dependent behaviour is tested without
 real sleeps.
 
+**A silent wait is indistinguishable from a hang**, and waiting out the 100-per-1800s stash window
+legitimately takes half an hour. `wait()` therefore reports a `WaitStatus` before each 5-second nap
+via `RateLimiter.on_wait`, so the wait explains itself while it happens:
+
+```
+Reading tab '26' (#44) - waiting 28m22s for rate limit (99 requests counted in the last 30m, limit 100)
+```
+
+`Bucket.binding()` returns the rule responsible, not just the delay — the rule is what turns a wait
+into an explanation. A wait caused by a server ban says so instead, because no local count explains
+one. The callback lives on the limiter rather than being threaded through `wait()`'s six call sites
+because the limiter is already the one object shared by the stash and trade clients, neither of
+which has any other use for a progress callback; it is expected to be scoped to one operation,
+since nothing clears it. `scan()` composes it with the last thing `say()` announced; `tabs` and
+`diagnose` do the same against their spinners, and `survey-bases` prints once per wait rather than
+every five seconds because its output is line-oriented.
+
+**`used` is counted against GGG's advertised limit and can legitimately exceed it.** Limits are
+per-account *and* per-IP, so a shared IP, a VPN or a trade overlay put hits on the clock this
+process never made, and `_merge_policies` keeps the tightest rule beside the most pessimistic count
+— which come from different rule sets in exactly that case. Phrasing it as a fraction of our own
+headroom-reduced budget rendered it `40/29 used`, which reads as having blown a limit: the one
+thing that earns a ban, and the one thing that had not happened. Hence "counted in the last", which
+says whose count it is without claiming it is all ours.
+
 ### Auth: two paths (`auth.py`, `stash.py`, `Config.auth_mode`)
 
 - **OAuth** — public client, PKCE, loopback redirect. Preferred, but GGG's developer docs currently
