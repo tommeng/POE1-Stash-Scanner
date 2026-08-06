@@ -81,7 +81,13 @@ def normalise(text: str) -> str:
     return _NUM.sub(repl, text)
 
 
-def _signless(template: str) -> str:
+def signless(template: str) -> str:
+    """Drop a sign that immediately precedes a placeholder.
+
+    The game and the trade site disagree on sign convention for some mods
+    ("-#% to Fire Resistance" vs the canonical "+#%"), so comparisons that
+    should ignore it run both sides through this.
+    """
     return template.replace("+#", "#").replace("-#", "#")
 
 
@@ -159,7 +165,7 @@ class StatIndex:
                 tpl = normalise(entry["text"])
                 # First writer wins: entries are ordered by trade-site relevance.
                 exact.setdefault(tpl, sid)
-                loose.setdefault(_signless(tpl), sid)
+                loose.setdefault(signless(tpl), sid)
 
     def resolve(self, text: str, domain: str = "explicit") -> "tuple[str | None, float]":
         """Resolve a rolled mod line to ``(stat_id, value_sign)``.
@@ -176,7 +182,7 @@ class StatIndex:
                 sid = self._exact.get(group, {}).get(candidate)
                 if sid:
                     return sid, sign
-            loose = _signless(candidate)
+            loose = signless(candidate)
             for group in groups:
                 sid = self._loose.get(group, {}).get(loose)
                 if sid:

@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 uv sync                                   # install
-uv run pytest                             # 215 tests, ~0.7s (fully offline)
+uv run pytest                             # 243 tests, ~3.7s (fully offline)
 uv run pytest tests/test_ratelimit.py     # one file
 uv run pytest -k test_reduced_resolves    # one test by name
 uv run poescan validate-rules             # every mod string and base name in the ruleset really exists
@@ -181,13 +181,18 @@ rare gear and are excluded unless named explicitly.
 
 - `tests/data/real_rings.json` holds ten rings scraped from live trade, all listed at 1 chaos.
   They are the regression guard against the ruleset drifting loose. Re-run after any rule edit.
-- The `index` fixture downloads trade metadata to `~/.poescan/data` on first run, then is offline.
+- **Trade metadata is vendored** at `tests/data/{stats,items}.json.gz` and the `index` fixture
+  reads it from there. It used to read the developer's own `~/.poescan/data` and `skip` when
+  cold, so a fresh machine reported green while silently skipping two thirds of the suite.
+  Refresh with `poescan refresh-data` then re-gzip into `tests/data/`.
 - **No test may reach the live trade API.** The endpoints ban rather than soft-fail, so a suite
   that calls them spends a budget the user needs and eventually blocks on it — `test_trade.py`
   once leaked ~4 real fetches per run this way, because only `_search` was stubbed and
   `price_check` fetches listings whenever a search returns ids.
-  `test_the_suite_never_reaches_the_live_trade_api` guards it. Tests that run `scan()` must also
-  point `RATELIMIT_STATE` at a tmp path, or they rewrite the user's real budget accounting.
+  A session-wide `autouse` fixture in `conftest.py` disables `httpx.HTTPTransport`, so this is
+  enforced for every test rather than asserted by one. `httpx.MockTransport` still works.
+  Tests that run `scan()` must also point `RATELIMIT_STATE` at a tmp path, or they rewrite the
+  user's real budget accounting.
 - Fixtures in `tests/fixtures.py` mirror the real stash JSON shape, so they exercise the same
   parsing path as live data.
 

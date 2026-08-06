@@ -218,46 +218,59 @@ def scan(
     cap = max_checks if max_checks is not None else ruleset.max_market_checks
     candidates = [Candidate(verdict=v) for v in promoted]
 
-    if verify and candidates:
-        with Cache() as cache, TradeClient(cfg.league, limiter, status=status) as trade:
-            dismissed = cache.dismissed_ids()
-            candidates = [c for c in candidates if c.item.id not in dismissed]
+    # Recorded usage must reach disk even if the scan dies part-way.
+    # observe() self-saves but throttles to once per 2s, so an exception
+    # can otherwise lose the last few hits - and the next run then fires
+    # blind, which is how a ban happens.
+    try:
+        if verify and candidates:
+            with Cache() as cache, TradeClient(cfg.league, limiter, status=status) as trade:
+                dismissed = cache.dismissed_ids()
+                candidates = [c for c in candidates if c.item.id not in dismissed]
 
-            say("Fetching currency rates...")
-            trade.load_rates()
+                say("Fetching currency rates...")
+                trade.load_rates()
 
-            checked = 0
-            for c in candidates:
-                cached = cache.get_check(c.item.id, cfg.league, cache_hours)
-                if cached:
-                    c.market = MarketResult(
-                        total=cached.total,
-                        query_url=cached.query_url,
-                        filters_used=cached.payload.get("filters") or [],
-                    )
-                    # Restore the numbers the properties would otherwise derive.
-                    c.market.listings = _listings_from_payload(cached.payload)
-                    c.from_cache = True
-                    report.cache_hits += 1
-                    # Costs no API call, and salvages checks stored before
-                    # feature logging existed.
-                    cache.backfill_features(c.item.id, cfg.league, _features(c.verdict))
-                    continue
-                if checked >= cap:
-                    report.notes.append(
-                        f"Stopped market checks at the {cap}-item cap; "
-                        f"{len(candidates) - checked} candidates scored by rules only."
-                    )
-                    break
-                left = trade.budget()
-                say(f"Checking market for {c.item.label} ({checked + 1}/{min(cap, len(candidates))})"
-                    + (f" - {left[0]} searches left in window" if left else ""))
-                c.market = trade.price_check(c.item, c.verdict)
-                cache.put_check(c.item.id, cfg.league, c.market, _features(c.verdict))
-                checked += 1
-            report.market_checks = checked
+                checked = 0
+                for c in candidates:
+                    cached = cache.get_check(c.item.id, cfg.league, cache_hours)
+                    if cached:
+                        c.market = MarketResult(
+                            total=cached.total,
+                            query_url=cached.query_url,
+                            filters_used=cached.payload.get("filters") or [],
+                        )
+                        # Restore the numbers the properties would otherwise derive.
+                        c.market.listings = _listings_from_payload(cached.payload)
+                        c.from_cache = True
+                        report.cache_hits += 1
+                        # Costs no API call, and salvages checks stored before
+                        # feature logging existed.
+                        cache.backfill_features(c.item.id, cfg.league, _features(c.verdict))
+                        continue
+                    if checked >= cap:
+                        report.notes.append(
+                            f"Stopped market checks at the {cap}-item cap; "
+                            f"{len(candidates) - checked} candidates scored by rules only."
+                        )
+                        break
+                    left = trade.budget()
+                    say(f"Checking market for {c.item.label} ({checked + 1}/{min(cap, len(candidates))})"
+                        + (f" - {left[0]} searches left in window" if left else ""))
+                    c.market = trade.price_check(c.item, c.verdict)
+                    # Never cache a failure. `error` is not persisted, so a stored
+                    # failure reads back as total=0 - which `interest` scores at 48
+                    # as "no comparable listings, possibly scarce". One ConnectError
+                    # would promote a junk item into the top results and not be
+                    # retried for the full cache lifetime.
+                    if not c.market.error:
+                        cache.put_check(c.item.id, cfg.league, c.market, _features(c.verdict))
+                    checked += 1
+                report.market_checks = checked
+    finally:
+        limiter.save(force=True)
 
-    limiter.save(force=True)
+
     candidates.sort(key=lambda c: -c.interest)
     report.candidates = candidates
     return report

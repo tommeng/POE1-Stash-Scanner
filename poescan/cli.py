@@ -38,8 +38,16 @@ from .tradedata import (
     fetch as fetch_tradedata,
     load_stat_index,
     normalise,
+    signless,
 )
-from .triage import DEFAULT_RULES, Ruleset, assess
+from .triage import (
+    CONDITION_KEYS,
+    DEFAULT_RULES,
+    FLAG_NAMES,
+    PSEUDO_NAMES,
+    Ruleset,
+    assess,
+)
 
 console = Console()
 
@@ -210,7 +218,10 @@ def cmd_scan(args) -> int:
         ruleset.promote_score = float(args.promote_score)
 
     console.print("Loading trade stat definitions...")
-    index = load_stat_index()
+    try:
+        index = load_stat_index()
+    except Exception as e:  # noqa: BLE001 - httpx, or a malformed payload
+        return _err(f"Could not load trade stat definitions: {e}")
 
     tabs_wanted = [t.strip() for t in args.tabs.split(",")] if args.tabs else None
 
@@ -343,7 +354,10 @@ def cmd_diagnose(args) -> int:
         return _err(str(e))
 
     ruleset = Ruleset.load(args.rules)
-    index = load_stat_index()
+    try:
+        index = load_stat_index()
+    except Exception as e:  # noqa: BLE001 - httpx, or a malformed payload
+        return _err(f"Could not load trade stat definitions: {e}")
     tabs_wanted = [t.strip() for t in args.tabs.split(",")] if args.tabs else list(cfg.tabs or [])
 
     try:
@@ -444,8 +458,12 @@ def cmd_validate(args) -> int:
 
     path = Path(args.rules) if args.rules else DEFAULT_RULES
     data = yaml.safe_load(path.read_text()) or {}
-    index = load_stat_index()
+    try:
+        index = load_stat_index()
+    except Exception as e:  # noqa: BLE001 - httpx, or a malformed payload
+        return _err(f"Could not load trade stat definitions: {e}")
     known_bases = base_types()
+    stat_texts = [signless(e["text"]) for e in index.by_id.values()]
 
     problems: list[tuple[str, str, str]] = []
     checked = 0
@@ -488,6 +506,45 @@ def cmd_validate(args) -> int:
                         else:
                             if not any(rx.search(b) for b in known_bases):
                                 problems.append((rid, pattern, "matches no known base type"))
+                    # mod_matches carries the highest-scoring rules in the
+                    # ruleset and went unchecked entirely until now. Compared
+                    # sign-agnostically: the game writes "-#% to Fire
+                    # Resistance" where trade stores the canonical "+#%", so a
+                    # literal comparison reports false alarms.
+                    if "mod_matches" in cond:
+                        checked += 1
+                        pattern = str(cond["mod_matches"])
+                        try:
+                            rx = _re.compile(signless(pattern), _re.IGNORECASE)
+                        except _re.error as e:
+                            problems.append((rid, pattern, f"invalid regex: {e}"))
+                        else:
+                            if not any(rx.search(t) for t in stat_texts):
+                                problems.append((rid, pattern, "matches no known trade stat"))
+                    # These three all fail closed and silently: a typo means the
+                    # rule simply never fires, with no error, forever.
+                    if "flag" in cond:
+                        checked += 1
+                        if str(cond["flag"]) not in FLAG_NAMES:
+                            problems.append((rid, str(cond["flag"]), "unknown flag name"))
+                    if "pseudo" in cond:
+                        checked += 1
+                        if str(cond["pseudo"]) not in PSEUDO_NAMES:
+                            problems.append((rid, str(cond["pseudo"]), "unknown pseudo field"))
+                    for cat in _as_list(cond.get("category")):
+                        checked += 1
+                        if cat not in CATEGORY_LABELS:
+                            problems.append((rid, cat, "unknown category id"))
+
+                    unknown = set(cond) - CONDITION_KEYS
+                    for key in sorted(unknown):
+                        checked += 1
+                        problems.append((rid, key, "unknown condition key - matches nothing"))
+
+            for cat in _as_list(rule.get("categories")) + _as_list(rule.get("exclude_categories")):
+                checked += 1
+                if cat not in CATEGORY_LABELS:
+                    problems.append((rid, cat, "unknown category id"))
 
     if problems:
         console.print(f"[red]{len(problems)} problem(s)[/] in {checked} references:\n")
