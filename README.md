@@ -215,11 +215,20 @@ uv run poescan analyse       # what your accumulated market checks say about the
 uv run poescan budget        # remaining API allowance, from saved state
 uv run poescan cache         # how much is cached
 uv run poescan refresh-data  # re-download trade metadata after a league or patch
+uv run poescan base-values --slot Ring --influence Shaper --ilvl 84
 uv run poescan survey-bases --category accessory.ring --ilvl 84 --influence shaper
 ```
 
-`analyse` and `budget` make no requests at all. `survey-bases` measures what an unrolled base type
-sells for, one search per base — see [Tuning](#tuning) for what it's good for and what it isn't.
+`analyse` and `budget` make no requests at all.
+
+`base-values` is what an unrolled base type sells for, imported from poe.ninja's economy API — one
+request covering every slot, cached for a day. `survey-bases` measures the same thing directly from
+GGG's trade API, one search per base. Use the first for numbers and the second to spot-check them:
+they agree on ordering, but poe.ninja's samples are 10–100× larger, because a snapshot of what is
+*listed right now* is very thin. Both apply a five-sample confidence floor — a single sampled Helical Ring reported 30,510
+chaos. Note poe.ninja's sample count caps at 399, so `base-values` shows samples and market
+listings as separate columns; reading one as the other is how a saturating denominator sneaks
+back in.
 
 ## Rate limits
 
@@ -335,7 +344,7 @@ being an anecdote.
 ## Development
 
 ```bash
-uv run pytest                             # 243 tests, ~3.7s
+uv run pytest                             # 273 tests, ~3.9s
 uv run pytest tests/test_ratelimit.py     # one file
 uv run pytest -k test_reduced_resolves    # one test
 uvx ruff check poescan --select F,E9

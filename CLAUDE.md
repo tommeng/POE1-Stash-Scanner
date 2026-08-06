@@ -6,13 +6,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 uv sync                                   # install
-uv run pytest                             # 243 tests, ~3.7s (fully offline)
+uv run pytest                             # 273 tests, ~3.9s (fully offline)
 uv run pytest tests/test_ratelimit.py     # one file
 uv run pytest -k test_reduced_resolves    # one test by name
 uv run poescan validate-rules             # every mod string and base name in the ruleset really exists
 uv run poescan budget                     # remaining API allowance; reads saved state, makes no requests
 uv run poescan analyse                    # what the accumulated checks say; makes no requests
-uv run poescan survey-bases --category accessory.ring --ilvl 84 --influence shaper
+uv run poescan base-values --slot Ring --influence Shaper --ilvl 84   # poe.ninja aggregate
+uv run poescan survey-bases --category accessory.ring --ilvl 84 --influence shaper  # GGG, spot-check
 uvx ruff check poescan --select F,E9      # ruff is not configured in pyproject; invoke it explicitly
 ```
 
@@ -107,10 +108,22 @@ built and killed against the live API, each ranking Sapphire and Iron Rings *abo
 | price leaving a fixed fraction | removes that error and still inverts |
 
 All four measured **rare** items, whose price is dominated by their mods; the base is a sliver of
-the variance and gets swamped. A white base has no mods, so its price *is* the base. Verified
-live: Vermillion 60c, Opal 20c, Two-Stone 2c, Sapphire and Iron not listed unrolled at all —
-which is itself the signal. `--influence` matters, since the crafting-base market is almost
-entirely influenced items.
+the variance and gets swamped. A white base has no mods, so its price *is* the base.
+`--influence` matters, since the crafting-base market is almost entirely influenced items.
+
+**But the survey's samples are far too thin to calibrate from** — 39 ring bases yielded exactly one
+row clearing the five-listing floor. `ninja.py` imports the same measurement from poe.ninja's
+economy API instead: one request, 19.4k rows across 23 slots, ~853 bases with a usable sample.
+The two agree on ordering (Vermillion > Opal > Amethyst ≈ Two-Stone > Sapphire ≈ Iron), which is
+worth something as mutual validation, but poe.ninja's magnitudes run lower and its counts are
+10–100× larger. It is the same underlying stash data, better aggregated — not a second opinion.
+
+The survey's "not sold as a base" rows were an artifact of that thinness, not signal: Sapphire and
+Iron Rings showed n=0 live while poe.ninja samples 385 and 152 of them at 1c. Note that
+poe.ninja's `count` is a **capped sample** (it saturates at 399), not a listing count —
+`ninja.py` exposes it as `samples` with `listings` alongside, because reading one as the other
+reintroduces exactly the saturating-denominator error that killed the survey's third design. A zero from a thin
+sample is still a thin sample. `TradeClient.base_value` is kept as the independent spot-check.
 
 ### Mod text ↔ trade stat translation (`tradedata.py`)
 

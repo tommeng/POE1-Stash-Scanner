@@ -26,6 +26,7 @@ from .config import (
     ensure_dirs,
     poesessid_problem,
 )
+from . import ninja
 from .items import CATEGORY_LABELS, classify
 from .report import render
 from .ratelimit import RateLimiter
@@ -644,6 +645,9 @@ def cmd_refresh_data(args) -> int:
 # The trade API stops counting here; a total at the cap is a floor, not a total.
 _API_RESULT_CAP = 10000
 
+# poe.ninja's `count` saturates here. Anything at the cap is a lower bound.
+NINJA_SAMPLE_CAP = 399
+
 
 def _median(values) -> float | None:
     vals = sorted(v for v in values if v is not None)
@@ -758,6 +762,88 @@ def cmd_analyse(args) -> int:
     console.print(
         "[dim]Your stash only shows bases you happen to own. For what a base is worth\n"
         "on its own, run [bold]poescan survey-bases[/].[/]"
+    )
+    return 0
+
+
+def cmd_base_values(args) -> int:
+    """What each base type is worth unrolled, from poe.ninja's aggregate.
+
+    One request covers every slot. `survey-bases` measures the same market
+    directly from GGG and agrees on ordering, but its samples are 10-100x
+    smaller - see poescan/ninja.py.
+    """
+    cfg = Config.load()
+    try:
+        league = ninja.resolve_league(args.league or cfg.league)
+        if args.slots:
+            for t in ninja.item_types(league):
+                console.print(f"  {t}")
+            return 0
+        if args.influences:
+            for i in ninja.influences(league):
+                console.print(f"  {i}")
+            console.print("  [dim]None[/]  (uninfluenced)")
+            return 0
+        rows = ninja.base_values(
+            league,
+            item_type=args.slot,
+            influence=args.influence,
+            ilvl_min=args.ilvl,
+            min_samples=args.min_samples,
+            force=args.refresh,
+        )
+    except ninja.NinjaError as e:
+        return _err(str(e))
+
+    if not rows:
+        console.print(
+            "[yellow]No rows matched.[/] The filters are all valid, so this is a real "
+            "empty result.\n"
+            f"Note the data only covers item levels 82-86{'' if not args.ilvl else f' - --ilvl {args.ilvl} may be outside that'}."
+        )
+        return 0
+
+    scope = " / ".join(
+        p for p in (args.slot, args.influence, f"ilvl >= {args.ilvl}" if args.ilvl else None) if p
+    )
+    table = Table(
+        title=f"Unrolled base values - {league}{f' ({scope})' if scope else ''}",
+        header_style="bold",
+    )
+    table.add_column("base")
+    table.add_column("slot", style="dim")
+    table.add_column("influence", style="dim")
+    table.add_column("ilvl", justify="right")
+    # `samples` is what the price was computed from and caps at 399; `listings`
+    # is the market. Showing both stops one being read as the other.
+    table.add_column("samples", justify="right")
+    table.add_column("listings", justify="right")
+    table.add_column("value", justify="right")
+
+    baseline = _median([r.chaos for r in rows])
+    for r in rows[: args.top]:
+        value = _price_cell(r.chaos, baseline) if r.chaos < 1000 else f"[green]{r.divine:,.1f}div[/]"
+        samples = str(r.samples) + ("+" if r.samples >= NINJA_SAMPLE_CAP else "")
+        table.add_row(
+            r.name,
+            r.item_type,
+            r.influence or "-",
+            str(r.ilvl),
+            samples if r.confident else f"[yellow]{samples}[/]",
+            f"{r.listings:,}",
+            value,
+        )
+    console.print(table)
+
+    shown = min(args.top, len(rows))
+    console.print(
+        f"\n[dim]{len(rows)} rows matched, showing {shown}. Rows below "
+        f"{args.min_samples} samples are hidden entirely - pass --min-samples 0 to see them,\n"
+        "but a single sampled Helical Ring reported 30510c, so they are noise rather than\n"
+        f"cheap data. A samples figure of {NINJA_SAMPLE_CAP}+ is poe.ninja's cap, not the\n"
+        "market size - read the listings column for that.\n"
+        "Same underlying stash data as the trade API, better aggregated - not a second opinion.[/]"
     )
     return 0
 
@@ -982,7 +1068,28 @@ def build_parser() -> argparse.ArgumentParser:
     )
     s.set_defaults(func=cmd_analyse)
 
-    s = sub.add_parser("survey-bases", help="measure what each base type floors at on the market")
+    s = sub.add_parser(
+        "base-values", help="what each base type is worth unrolled (poe.ninja aggregate)"
+    )
+    s.add_argument("--slot", help='item class, e.g. "Ring", "Body Armour"')
+    s.add_argument("--slots", action="store_true", help="list the slots available and exit")
+    s.add_argument(
+        "--influences", action="store_true", help="list the influences available and exit"
+    )
+    s.add_argument("--influence", help='e.g. Shaper, "Shaper/Elder", or None for uninfluenced')
+    s.add_argument("--ilvl", type=int, help="only rows at or above this item level")
+    s.add_argument(
+        "--min-samples",
+        type=int,
+        default=MIN_CONFIDENT_SAMPLE,
+        help=f"hide rows backed by fewer listings (default: {MIN_CONFIDENT_SAMPLE})",
+    )
+    s.add_argument("--top", type=int, default=30, help="rows to show (default: 30)")
+    s.add_argument("--league", help="override the configured league")
+    s.add_argument("--refresh", action="store_true", help="ignore the 24h cache")
+    s.set_defaults(func=cmd_base_values)
+
+    s = sub.add_parser("survey-bases", help="spot-check a base against GGG's own trade API")
     s.add_argument("--category", help="category id to survey, e.g. accessory.ring")
     s.add_argument("--bases", help="explicit base types instead, comma separated")
     s.add_argument("--ilvl", type=int, help="only count listings at or above this item level")
