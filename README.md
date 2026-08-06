@@ -205,7 +205,21 @@ Special tabs (Currency, Maps, Gems, Flasks…) can't hold rare gear and are skip
 | `--json out.json` | machine-readable results alongside the HTML |
 
 Market checks are cached in SQLite for 72 hours keyed on item id, so rescanning a tab you've
-already looked at costs almost nothing.
+already looked at costs almost nothing. Failed checks are deliberately *not* cached, so a dropped
+connection doesn't poison the results until the cache expires.
+
+### Other commands
+
+```bash
+uv run poescan analyse       # what your accumulated market checks say about the ruleset
+uv run poescan budget        # remaining API allowance, from saved state
+uv run poescan cache         # how much is cached
+uv run poescan refresh-data  # re-download trade metadata after a league or patch
+uv run poescan survey-bases --category accessory.ring --ilvl 84 --influence shaper
+```
+
+`analyse` and `budget` make no requests at all. `survey-bases` measures what an unrolled base type
+sells for, one search per base — see [Tuning](#tuning) for what it's good for and what it isn't.
 
 ## Rate limits
 
@@ -263,18 +277,50 @@ moves and a static ruleset goes stale. Mod strings are *templates*: the rolled n
 ```
 
 Condition types: `pseudo` (computed totals), `mod`/`mod_any` (exact template), `mod_matches`
-(regex, tested against both rolled text and template), `stat` (trade stat id), `flag`, and the
-scalars `ilvl`, `links`, `sockets`, `quality`, `influence_count`. Add `abs: true` for mods that
-roll negative, like `-7 to Total Mana Cost of Skills`.
+(regex, tested against both rolled text and template), `stat`/`stat_any` (trade stat id), `flag`,
+`base`/`base_any` (exact base type) and `base_matches` (regex, for families), `category`, and the
+scalars `ilvl`, `links`, `sockets`, `quality`, `influence_count`, `mod_count`. Add `abs: true` for
+mods that roll negative, like `-7 to Total Mana Cost of Skills`.
+
+Base type is much finer than `category` — an Opal Ring and an Iron Ring are both `accessory.ring`.
+Note that base value is conditional rather than intrinsic: seven of the ten known-1-chaos reference
+rings are ilvl 83–85 Two-Stone Rings, a base most guides call desirable. So a `base` condition
+almost always belongs alongside an `ilvl` or mod condition rather than scoring on its own.
 
 ```bash
-uv run poescan validate-rules   # every mod string still maps to a real trade stat
+uv run poescan validate-rules   # every mod string, regex, flag, pseudo field, base and category
 uv run poescan categories       # valid category ids
 ```
 
-One warning: resist the urge to raise `promote_score` when results feel noisy. That reintroduces
-false negatives — the failure mode that actually costs you money — and the market check already
-sorts the noise to the bottom.
+`validate-rules` matters more than it sounds. Every condition kind fails *closed*: a typo in a flag
+name or a mod template doesn't error, the rule just silently never fires, forever. Run it after
+every edit.
+
+Two warnings, both learned by measurement:
+
+- **Resist the urge to raise `promote_score` when results feel noisy.** That reintroduces false
+  negatives — the failure mode that actually costs you money — and the market check already sorts
+  the noise to the bottom.
+- **Don't write nested rules that stack.** A rule for `life >= 90` scoring 7 plus one for
+  `life >= 115` scoring another 5 looks like two signals, but the second can never fire without the
+  first, so `analyse` can never tell them apart and will report identical numbers for both no matter
+  what they're worth. Write disjoint bands instead — `none: [{pseudo: life, min: 115}]` on the lower
+  one — so each describes a different population.
+
+### Checking whether your rules earn their score
+
+Every scan pays for real price observations, and records the item that produced each one. `analyse`
+reads them back — offline, no API calls:
+
+```bash
+uv run poescan analyse
+```
+
+It reports whether the triage score tracks price at all, the price distribution of the items each
+rule fired on, which rules never fire, and the base types you actually own. That's the evidence to
+edit the ruleset from, rather than intuition. It needs a few scans' worth of data before the
+per-rule numbers mean much — five or more observations per row is the point where a median stops
+being an anecdote.
 
 ## Limitations
 
@@ -289,7 +335,7 @@ sorts the noise to the bottom.
 ## Development
 
 ```bash
-uv run pytest                             # 168 tests, ~1.5s
+uv run pytest                             # 243 tests, ~3.7s
 uv run pytest tests/test_ratelimit.py     # one file
 uv run pytest -k test_reduced_resolves    # one test
 uvx ruff check poescan --select F,E9
@@ -297,8 +343,13 @@ uvx ruff check poescan --select F,E9
 
 The suite includes ten rings scraped from live trade, all listed at 1 chaos, asserted to stay below
 genuinely valuable items — the regression guard against the ruleset drifting loose. Rate-limit
-behaviour is tested against an injected clock rather than by sleeping. The first run downloads trade
-metadata to `~/.poescan/data`; everything after is offline.
+behaviour is tested against an injected clock rather than by sleeping.
+
+**The suite never touches the network.** Trade metadata is vendored at `tests/data/*.json.gz`, and a
+session-wide fixture disables the real HTTP transport, so a test that tries to reach GGG fails
+loudly instead of quietly spending your API budget. Both of those are there because the suite once
+did exactly that — roughly four live requests per run, which eventually made it stall for five
+minutes when the allowance ran out.
 
 `CLAUDE.md` documents the architecture in more depth, including the non-obvious parts worth knowing
 before changing scoring or the rate limiter.
