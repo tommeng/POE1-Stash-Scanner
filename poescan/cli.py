@@ -15,6 +15,7 @@ from rich.console import Console
 from rich.table import Table
 
 from . import __version__
+from . import calibration
 from .auth import AuthError, authorize, get_token
 from .cache import Cache
 from .config import (
@@ -676,17 +677,37 @@ def _price_cell(med: float | None, baseline: float | None) -> str:
     return f"{med:.0f}c"
 
 
+def _group_rows(table: Table, groups, baseline: float | None, limit: int | None = None) -> None:
+    """Render Groups into a table whose columns are already declared."""
+    for g in groups[:limit] if limit else groups:
+        table.add_row(
+            g.key,
+            str(g.n),
+            _price_cell(g.median, baseline),
+            f"{g.best:.0f}c" if g.best is not None else "[dim]-[/]",
+            f"[green]{g.tail}[/]" if g.tail else "[dim]0[/]",
+        )
+
+
 def cmd_analyse(args) -> int:
     """Read the accumulated market checks back and ask what they say.
 
     Every scan already pays for real price observations. This pairs them with
     the items that produced them, so the hand-authored scores can be checked
     against outcomes instead of argued about. Makes no API calls.
+
+    The maths lives in `calibration.py`; this function only renders it.
     """
     cfg = Config.load()
     league = args.league or cfg.league
+    threshold = float(args.tail)
     with Cache() as cache:
         rows = cache.observations(league)
+
+    try:
+        ruleset = Ruleset.load(args.rules)
+    except (OSError, ValueError) as e:
+        return _err(f"Could not load ruleset: {e}")
 
     if not rows:
         console.print(
@@ -697,14 +718,51 @@ def cmd_analyse(args) -> int:
         )
         return 0
 
-    priced = [r for r in rows if r.get("median") is not None]
-    baseline = _median([r["median"] for r in priced])
+    # -- whose ruleset are these observations even about? -------------------
+    #
+    # A rule id means nothing without the ruleset that defined it. Pooling two
+    # vocabularies produces a table that looks like evidence and is not, which
+    # is how the nested life bands went on being reported after being split.
+    setaside = calibration.stale(rows, ruleset.fingerprint)
+    if setaside:
+        vocab = calibration.vocabularies(setaside)
+        listed = ", ".join(f"{k} x{n}" for k, n in vocab[:3]) + (", ..." if len(vocab) > 3 else "")
+        verb = "Pooling" if args.all_versions else "Setting aside"
+        console.print(
+            f"\n[yellow]{verb} {len(setaside)} of {len(rows)} observations[/] labelled by a "
+            f"ruleset other than the one loaded here ({listed})."
+        )
+        console.print(
+            "[dim]Their prices are real; their rule labels describe rules that may no longer "
+            "exist. Run [bold]poescan scan[/] over the same tabs to re-label them for free"
+            + (".[/]" if args.all_versions else ", or [bold]--all-versions[/] to pool them.[/]")
+        )
+        if not args.all_versions:
+            rows = calibration.matching(rows, ruleset.fingerprint)
 
-    console.print(f"\n[bold]{len(rows)}[/] observations in {league}, [bold]{len(priced)}[/] priced.")
+    priced = calibration.priced(rows)
+    if not priced:
+        console.print(
+            f"\n[yellow]No priced observations for ruleset {ruleset.fingerprint}.[/]\n"
+            "A scan over the same tabs will re-label the cached ones at no API cost."
+        )
+        return 0
+
+    baseline = calibration.baseline(priced)
+    scope = "pooled" if args.all_versions and setaside else f"ruleset [bold]{ruleset.fingerprint}[/]"
+    console.print(
+        f"\n[bold]{len(rows)}[/] observations in {league}, "
+        f"[bold]{len(priced)}[/] priced, {scope}."
+    )
     if baseline is not None:
         lo = min(r["median"] for r in priced)
         hi = max(r["median"] for r in priced)
-        console.print(f"Median price [bold]{baseline:.0f}c[/]  (range {lo:.0f}c - {hi:.0f}c)\n")
+        console.print(f"Median price [bold]{baseline:.0f}c[/]  (range {lo:.0f}c - {hi:.0f}c)")
+    console.print(
+        f"[dim]`best` is the top price a row saw; `>={threshold:g}c` counts the items that\n"
+        "cleared it. Triage is a filter, so those two columns are the ones that matter -\n"
+        "a rule earns its place by what it catches, not by its typical item.[/]\n"
+    )
     if len(priced) < 30:
         console.print(
             "[yellow]Small sample.[/] Treat everything below as direction, not calibration -\n"
@@ -712,66 +770,55 @@ def cmd_analyse(args) -> int:
         )
 
     # -- does the triage score track price at all? --------------------------
-    buckets = [(0, 10), (10, 15), (15, 20), (20, 30), (30, 10_000)]
     t = Table(title="Triage score vs price", header_style="bold")
     t.add_column("score")
     t.add_column("items", justify="right")
-    t.add_column("median price", justify="right")
-    for lo_s, hi_s in buckets:
-        got = [r["median"] for r in priced if lo_s <= (r.get("triage_score") or 0) < hi_s]
-        if not got:
-            continue
-        label = f"{lo_s}-{hi_s - 1}" if hi_s < 10_000 else f"{lo_s}+"
-        t.add_row(label, str(len(got)), _price_cell(_median(got), baseline))
+    t.add_column("median", justify="right")
+    t.add_column("best", justify="right")
+    t.add_column(f">={threshold:g}c", justify="right")
+    _group_rows(t, calibration.by_score_band(priced, threshold), baseline)
     console.print(t)
-    console.print(
-        "[dim]If this column is flat, the scores are filtering, not ranking - which is\n"
-        "what scanner.py already assumes. A rising column would be new information.[/]\n"
-    )
+
+    missed, valuable = calibration.tail_below(priced, ruleset.promote_score + 5, threshold)
+    if valuable:
+        console.print(
+            f"[dim]If this column is flat, the scores are filtering, not ranking - which is\n"
+            f"what scanner.py already assumes. A rising column would be new information.[/]\n"
+            f"[bold]{missed} of {valuable}[/] items worth {threshold:g}c+ scored under "
+            f"{ruleset.promote_score + 5:g}, i.e. in the lowest promoted band.\n"
+            f"[dim]That is the cost of raising promote_score, measured rather than argued.[/]\n"
+        )
 
     # -- which rules actually fire on items worth something? ----------------
-    by_rule: dict[str, list[float]] = {}
-    for r in priced:
-        for rid in r.get("rules_hit") or []:
-            by_rule.setdefault(rid, []).append(r["median"])
-
-    t = Table(title="Rules, by the price of items they fired on", header_style="bold")
+    t = Table(
+        title=f"Rules, by what they caught (>={threshold:g}c first)", header_style="bold"
+    )
     t.add_column("rule")
     t.add_column("fired", justify="right")
-    t.add_column("median price", justify="right")
-    for rid, prices in sorted(by_rule.items(), key=lambda kv: -(_median(kv[1]) or 0)):
-        if len(prices) < args.min_samples:
-            continue
-        t.add_row(rid, str(len(prices)), _price_cell(_median(prices), baseline))
+    t.add_column("median", justify="right")
+    t.add_column("best", justify="right")
+    t.add_column(f">={threshold:g}c", justify="right")
+    _group_rows(t, calibration.by_rule(priced, threshold, args.min_samples), baseline)
     console.print(t)
 
-    try:
-        ruleset = Ruleset.load(args.rules)
-    except (OSError, ValueError) as e:
-        return _err(f"Could not load ruleset: {e}")
-    never = [str(r.get("id", "?")) for r in ruleset.rules if str(r.get("id", "?")) not in by_rule]
+    never = calibration.never_fired(priced, ruleset)
     if never:
         console.print(
-            f"[dim]{len(never)} rules never fired on a priced item: "
+            f"[dim]{len(never)} rules never fired on a priced item - unmeasured, which is not\n"
+            "the same as worthless: "
             + ", ".join(never[:12])
             + ("..." if len(never) > 12 else "")
             + "[/]\n"
         )
 
     # -- base types ---------------------------------------------------------
-    by_base: dict[str, list[float]] = {}
-    for r in priced:
-        if r.get("base_type"):
-            by_base.setdefault(r["base_type"], []).append(r["median"])
-
     t = Table(title="Base types seen", header_style="bold")
     t.add_column("base")
     t.add_column("seen", justify="right")
-    t.add_column("median price", justify="right")
-    for base, prices in sorted(by_base.items(), key=lambda kv: -(_median(kv[1]) or 0))[:25]:
-        if len(prices) < args.min_samples:
-            continue
-        t.add_row(base, str(len(prices)), _price_cell(_median(prices), baseline))
+    t.add_column("median", justify="right")
+    t.add_column("best", justify="right")
+    t.add_column(f">={threshold:g}c", justify="right")
+    _group_rows(t, calibration.by_base(priced, threshold, args.min_samples), baseline, limit=25)
     console.print(t)
     console.print(
         "[dim]Your stash only shows bases you happen to own. For what a base is worth\n"
@@ -1079,6 +1126,20 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=1,
         help="hide rows backed by fewer items than this (default: 1)",
+    )
+    s.add_argument(
+        "--tail",
+        type=float,
+        default=calibration.TAIL_THRESHOLD,
+        help=(
+            "chaos value above which an item counts as one worth catching "
+            f"(default: {calibration.TAIL_THRESHOLD:g})"
+        ),
+    )
+    s.add_argument(
+        "--all-versions",
+        action="store_true",
+        help="pool observations written under other rulesets (their rule labels are stale)",
     )
     s.set_defaults(func=cmd_analyse)
 

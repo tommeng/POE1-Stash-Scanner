@@ -38,6 +38,8 @@ every ruleset that was ever correct.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -98,11 +100,42 @@ class Ruleset:
         self.promote_score = float(self.settings.get("promote_score", 25))
         self.min_ilvl = int(self.settings.get("min_ilvl", 0))
         self.max_market_checks = int(self.settings.get("max_market_checks", 40))
+        self.fingerprint = fingerprint(data)
 
     @classmethod
     def load(cls, path: Path | str | None = None) -> "Ruleset":
         p = Path(path) if path else DEFAULT_RULES
         return cls(yaml.safe_load(p.read_text()) or {})
+
+
+def fingerprint(data: dict) -> str:
+    """A short, stable hash of the parts of a ruleset that decide scoring.
+
+    Recorded alongside every price observation, because a rule id on its own is
+    not a stable label: rules get retuned, split and renamed, and the stored
+    ``rules_hit`` then describes a ruleset that no longer exists while reading
+    exactly like current evidence.
+
+    That is not hypothetical. When the life rules were nested, an item over 115
+    life hit ``high-life`` *and* ``very-high-life``; splitting them into disjoint
+    bands made that impossible. 27 observations in the author's cache carry both
+    ids, and ``analyse`` presented them as evidence about the split rules -
+    reporting the two bands as firing on an identical 24 items at an identical
+    median, which is the nested behaviour the split was meant to end.
+
+    Covers ``rules``, ``veto`` and the two settings that decide whether an item
+    is scored at all. ``max_market_checks`` is deliberately excluded: it caps
+    how many items get priced, not how any item is judged, so changing it must
+    not orphan the evidence collected so far.
+    """
+    material = {
+        "rules": data.get("rules") or [],
+        "veto": data.get("veto") or [],
+        "promote_score": (data.get("settings") or {}).get("promote_score"),
+        "min_ilvl": (data.get("settings") or {}).get("min_ilvl"),
+    }
+    blob = json.dumps(material, sort_keys=True, default=str).encode("utf-8")
+    return hashlib.sha256(blob).hexdigest()[:12]
 
 
 # --------------------------------------------------------------------------
