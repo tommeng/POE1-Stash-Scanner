@@ -19,6 +19,21 @@ are both ``accessory.ring``. Note that base value is conditional rather than
 intrinsic - seven of the ten known-1c reference rings are ilvl 83-85 Two-Stone
 Rings, a base meta knowledge calls desirable - so a ``base`` condition almost
 always belongs alongside an ``ilvl`` or mod condition rather than scoring alone.
+
+**One condition names one selector.** ``{base: Opal Ring, ilvl: {min: 84}}``
+looks like a conjunction and is not one: ``evaluate_condition`` reads a single
+selector and discards the rest, so that form returned True for an ilvl 86 Iron
+Ring. Loading a ruleset that contains it now raises ``RulesetError`` instead;
+write the two as separate entries under ``all``, where they really are ANDed.
+
+Rejecting rather than teaching ``evaluate_condition`` to AND them is deliberate.
+``min``/``max``/``abs`` are modifiers of whichever selector is present, so a
+condition naming two selectors that both consume them (``{pseudo: life, mod: X,
+min: 90}``) has no single defensible reading. ANDing would also change which
+mods land in ``matched``, and ``matched`` is what the report cites as the reason
+an item was flagged and what the trade query filters on - a behaviour change in
+ranking-adjacent code, to support a form no rule uses. Rejecting is a no-op for
+every ruleset that was ever correct.
 """
 
 from __future__ import annotations
@@ -64,7 +79,19 @@ class Verdict:
 
 
 class Ruleset:
+    """A loaded ruleset, rejected outright if it cannot be evaluated as written.
+
+    The check happens here rather than only in ``validate-rules`` because
+    ``validate-rules`` is a command the user has to remember to run: someone who
+    edits the YAML and goes straight to ``scan`` would otherwise get scores
+    computed from a condition half of which was discarded.
+    """
+
     def __init__(self, data: dict) -> None:
+        ambiguous = ambiguous_conditions(data)
+        if ambiguous:
+            raise RulesetError("\n".join(str(a) for a in ambiguous))
+
         self.settings = data.get("settings") or {}
         self.rules = data.get("rules") or []
         self.veto = data.get("veto") or []
@@ -122,27 +149,104 @@ _SCALARS = {
 }
 
 
+# The selectors `evaluate_condition` below understands, grouped by the ones it
+# reads together. Within a group the keys are unioned, so `{mod: A, mod_any:
+# [B]}` tests A and B and is a legitimate condition. Across groups only one is
+# read and the others are silently dropped, which is why naming two is rejected
+# at load time - see `conflicting_selectors`.
+SELECTOR_FAMILIES = (
+    frozenset({"pseudo"}),
+    frozenset({"mod", "mod_any"}),
+    frozenset({"mod_matches"}),
+    frozenset({"stat", "stat_any"}),
+    frozenset({"flag"}),
+    frozenset({"base", "base_any"}),
+    frozenset({"base_matches"}),
+    frozenset({"category"}),
+    *(frozenset({name}) for name in _SCALARS),
+)
+
 # Every key `evaluate_condition` below understands. `validate-rules` checks the
 # ruleset against these rather than keeping its own list, because the two did
 # drift: `mod_matches` was added here and never added there, so the eleven
 # highest-scoring rules in the ruleset went unvalidated. A condition key that
 # is not in this set matches nothing and fails silently, forever.
-CONDITION_VALUE_KEYS = frozenset(
-    {
-        "pseudo",
-        "mod", "mod_any", "mod_matches",
-        "stat", "stat_any",
-        "flag",
-        "base", "base_any", "base_matches",
-        "category",
-        *_SCALARS,
-    }
-)
+CONDITION_VALUE_KEYS = frozenset().union(*SELECTOR_FAMILIES)
+# Modifiers qualify whichever selector the condition names, so they co-occur
+# with one freely: `{pseudo: attributes, min: 70}` is the normal form.
 CONDITION_MODIFIER_KEYS = frozenset({"min", "max", "abs", "is"})
 CONDITION_KEYS = CONDITION_VALUE_KEYS | CONDITION_MODIFIER_KEYS
 
 FLAG_NAMES = frozenset(_FLAGS)
 PSEUDO_NAMES = frozenset(_PSEUDO_FIELDS)
+
+
+class RulesetError(ValueError):
+    """A ruleset that cannot be evaluated as written.
+
+    Subclasses ``ValueError`` so callers already guarding ``Ruleset.load``
+    against a malformed file catch it too.
+    """
+
+
+@dataclass(frozen=True)
+class AmbiguousCondition:
+    """A condition naming several selectors, only one of which would be read."""
+
+    rule_id: str
+    section: str
+    keys: tuple[str, ...]
+
+    @property
+    def where(self) -> str:
+        return f"{self.section}: {', '.join(self.keys)}"
+
+    @property
+    def reason(self) -> str:
+        return (
+            "condition names more than one selector - only one of them is "
+            "evaluated and the rest are silently ignored. Write one condition "
+            "per selector; entries under `all` are ANDed."
+        )
+
+    def __str__(self) -> str:
+        return f"rule '{self.rule_id}' ({self.where}) {self.reason}"
+
+
+def conflicting_selectors(cond: dict) -> tuple[str, ...]:
+    """The selector keys in ``cond`` that cannot be evaluated together.
+
+    Empty for every condition ``evaluate_condition`` reads in full: one
+    selector, optionally with ``min``/``max``/``abs``/``is``, and optionally
+    with its own family's aliases (``mod`` beside ``mod_any``).
+    """
+    if not isinstance(cond, dict):
+        return ()
+    named = [family & cond.keys() for family in SELECTOR_FAMILIES]
+    named = [keys for keys in named if keys]
+    if len(named) < 2:
+        return ()
+    return tuple(sorted(key for keys in named for key in keys))
+
+
+def ambiguous_conditions(data: dict) -> list[AmbiguousCondition]:
+    """Every condition in a raw ruleset that names more than one selector.
+
+    Returned rather than raised so ``validate-rules`` can list them alongside
+    its other findings instead of dying on the first one.
+    """
+    found: list[AmbiguousCondition] = []
+    for section in ("veto", "rules"):
+        for rule in data.get(section) or []:
+            if not isinstance(rule, dict):
+                continue
+            rule_id = str(rule.get("id", "?"))
+            for group in ("all", "any", "none"):
+                for cond in rule.get(group) or []:
+                    keys = conflicting_selectors(cond)
+                    if keys:
+                        found.append(AmbiguousCondition(rule_id, group, keys))
+    return found
 
 
 def _in_range(value: float, spec) -> bool:
@@ -180,7 +284,12 @@ def _as_list(v) -> list[str]:
 
 
 def evaluate_condition(cond: dict, item: Item, p: Pseudo, matched: list | None = None) -> bool:
-    """Test one condition. Satisfying mods are appended to ``matched``."""
+    """Test one condition. Satisfying mods are appended to ``matched``.
+
+    Reads exactly one selector - the first present, in the order below - so a
+    condition naming two is refused when the ruleset loads rather than half
+    evaluated here. See ``conflicting_selectors``.
+    """
     if not isinstance(cond, dict):
         return False
 

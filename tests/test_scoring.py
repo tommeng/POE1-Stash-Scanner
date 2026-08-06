@@ -5,10 +5,18 @@ from pathlib import Path
 
 import fixtures as F
 import pytest
+import yaml
 
 from poescan.items import from_stash_json
 from poescan.pseudo import compute
-from poescan.triage import Ruleset, assess, notable_mods
+from poescan.triage import (
+    DEFAULT_RULES,
+    Ruleset,
+    RulesetError,
+    ambiguous_conditions,
+    assess,
+    notable_mods,
+)
 
 REAL_ITEMS = Path(__file__).parent / "data" / "real_rings.json"
 
@@ -354,6 +362,83 @@ def test_base_combines_with_ilvl(index):
     assert not _fires(F.item(baseType="Two-Stone Ring", ilvl=80), index, rs)
 
 
+# -- one condition names one selector ---------------------------------------
+#
+# `{base: Opal Ring, ilvl: {min: 84}}` reads as a conjunction and is not one:
+# only one selector was evaluated and the other was discarded, so that rule
+# fired on an ilvl 86 Iron Ring. The form is now refused when the ruleset loads,
+# because `validate-rules` is a command the user has to remember to run.
+
+
+AMBIGUOUS = "ambiguous"
+
+
+def _load(*conds, section: str = "rules", group: str = "all") -> Ruleset:
+    rule = {"id": AMBIGUOUS, "score": 5, group: list(conds)}
+    return Ruleset({"settings": {"promote_score": 1, "min_ilvl": 0}, section: [rule]})
+
+
+def _fired(raw, index, rs) -> bool:
+    return AMBIGUOUS in {h.rule_id for h in assess(from_stash_json(raw, index), rs).hits}
+
+
+@pytest.mark.parametrize(
+    "cond",
+    [
+        pytest.param({"base": "Opal Ring", "ilvl": {"min": 84}}, id="base-and-ilvl"),
+        pytest.param({"ilvl": {"min": 84}, "links": {"min": 5}}, id="two-scalars"),
+        pytest.param({"pseudo": "life", "min": 90, "flag": "influenced"}, id="pseudo-and-flag"),
+        pytest.param({"mod": "+# to maximum Life", "mod_matches": "Life"}, id="mod-and-matches"),
+        pytest.param({"base": "Opal Ring", "base_matches": "Ring"}, id="base-and-matches"),
+        pytest.param({"category": "accessory.ring", "flag": "corrupted"}, id="category-and-flag"),
+    ],
+)
+def test_a_condition_naming_two_selectors_is_refused_at_load(cond):
+    with pytest.raises(RulesetError):
+        _load(cond)
+
+
+def test_the_refusal_names_the_rule_and_the_conflicting_keys():
+    """The message has to be enough to find the line in the YAML."""
+    with pytest.raises(RulesetError) as raised:
+        _load({"base": "Opal Ring", "ilvl": {"min": 84}})
+    message = str(raised.value)
+    assert AMBIGUOUS in message
+    assert "base" in message and "ilvl" in message
+
+
+@pytest.mark.parametrize("group", ["all", "any", "none"])
+def test_every_condition_group_is_checked(group):
+    with pytest.raises(RulesetError):
+        _load({"base": "Opal Ring", "ilvl": {"min": 84}}, group=group)
+
+
+def test_veto_rules_are_checked_too():
+    """A veto that half-evaluates discards items, which is the costlier mistake."""
+    with pytest.raises(RulesetError):
+        _load({"base": "Opal Ring", "ilvl": {"min": 84}}, section="veto")
+
+
+def test_a_selector_with_min_and_max_is_not_ambiguous(index):
+    """`{pseudo: attributes, min: 70}` is the normal, correct form."""
+    rs = _load({"pseudo": "life", "min": 90, "max": 115})
+    assert _fired(F.item(explicitMods=["+100 to maximum Life"]), index, rs)
+    assert not _fired(F.item(explicitMods=["+130 to maximum Life"]), index, rs)
+
+
+def test_aliases_of_one_selector_may_share_a_condition(index):
+    """`mod` and `mod_any` are unioned by the evaluator, so they do not conflict."""
+    rs = _load({"mod": "+# to maximum Life", "mod_any": ["+# to Strength"], "min": 20})
+    assert _fired(F.item(explicitMods=["+25 to Strength"]), index, rs)
+    assert _fired(F.item(explicitMods=["+99 to maximum Life"]), index, rs)
+    assert not _fired(F.item(explicitMods=["+5 to Strength"]), index, rs)
+
+
+def test_the_shipped_ruleset_names_one_selector_per_condition():
+    """Nothing in `default.yaml` used the ambiguous form, and nothing may start."""
+    assert ambiguous_conditions(yaml.safe_load(DEFAULT_RULES.read_text())) == []
+
+
 # -- calibration against real listings --------------------------------------
 
 
@@ -375,3 +460,26 @@ def test_real_one_chaos_rings_score_below_valuable_items(index, ruleset):
         if assess(from_stash_json(r, index), ruleset).score >= worst_valuable
     ]
     assert offenders == [], f"junk rings out-scored real value: {offenders}"
+
+
+def test_a_known_multi_divine_amulet_is_still_promoted(index, ruleset):
+    """The guard against the ruleset drifting *tight*.
+
+    The ten 1c rings above guard the loose direction. This is the other side: a
+    real Turquoise Amulet whose comparables on the trade site ran from 20 chaos
+    to 10 divine, recorded in `TrainingData/Hypnotic Beads, Turquoise Amulet/`.
+
+    When it was recorded it scored exactly promote_score - a margin of zero, on
+    `attribute-stacking` alone (76 total attributes against a min of 70). One
+    point off that roll, or one point onto that threshold, drops it. So if a
+    rule edit makes this fail, the edit has introduced a false negative on a
+    multi-divine item, which is the failure mode that costs the user money.
+
+    Only promotion is asserted. The score is not: it is an observation about a
+    hand-authored prior, not a fact the ruleset is obliged to reproduce.
+    """
+    v = assess(from_stash_json(F.HYPNOTIC_BEADS_AMULET, index), ruleset)
+    assert v.promoted, (
+        f"scored {v.score} against promote_score {ruleset.promote_score} "
+        f"(10 vs 10 when recorded); hits={[h.rule_id for h in v.hits]}"
+    )

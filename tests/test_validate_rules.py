@@ -51,6 +51,19 @@ def test_a_broken_condition_is_caught(tmp_path, index, cond, what):
     assert _run(tmp_path, [{"id": "bad", "score": 5, "all": [cond]}]) == 1, what
 
 
+def test_a_condition_naming_two_selectors_is_reported_not_raised(tmp_path, index, capsys):
+    """`{base: ..., ilvl: ...}` evaluates one key and discards the other, so
+    `Ruleset.load` refuses it. This command reads the YAML directly, and must
+    list it as a finding rather than exit on a traceback."""
+    assert _run(tmp_path, [{
+        "id": "base-plus-ilvl", "score": 5,
+        "all": [{"base": "Opal Ring", "ilvl": {"min": 84}}],
+    }]) == 1
+    out = capsys.readouterr().out
+    assert "base-plus-ilvl" in out
+    assert "more than one selector" in out
+
+
 def test_unknown_rule_level_category_is_caught(tmp_path, index):
     assert _run(tmp_path, [{
         "id": "bad", "score": 5,
