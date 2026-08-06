@@ -197,6 +197,39 @@ def test_a_second_429_is_reported_rather_than_looping():
     c.close()
 
 
+@pytest.mark.parametrize(
+    "boom",
+    [
+        httpx.ConnectError("connection refused"),
+        httpx.ReadTimeout("timed out"),
+        httpx.RemoteProtocolError("server disconnected"),
+    ],
+    ids=lambda e: type(e).__name__,
+)
+def test_transport_failures_become_stash_errors(boom):
+    """cmd_scan catches only StashError, so an unwrapped httpx exception
+    part-way through a scan gave the user a traceback rather than a sentence."""
+    def handler(request):
+        raise boom
+
+    c = _client(handler)
+    with pytest.raises(StashError, match="Could not reach the stash API"):
+        c.list_tabs()
+    c.close()
+
+
+def test_the_transport_error_names_what_went_wrong():
+    def handler(request):
+        raise httpx.ConnectError("connection refused")
+
+    c = _client(handler)
+    with pytest.raises(StashError) as exc:
+        c.list_tabs()
+    c.close()
+    assert "ConnectError" in str(exc.value)
+    assert "connection refused" in str(exc.value)
+
+
 def test_403_explains_the_likely_causes():
     c = _client(lambda r: httpx.Response(403, text="<html>denied</html>"))
     with pytest.raises(StashError, match="stale|Cloudflare"):

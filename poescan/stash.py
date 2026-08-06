@@ -44,6 +44,21 @@ class _PolicyTracking:
         if name:
             self._policy = name
 
+    def _send(self, request) -> "httpx.Response":
+        """Issue a request, turning transport failures into StashError.
+
+        Both clients translate HTTP *status codes* into useful messages, but a
+        ConnectError, ReadTimeout or RemoteProtocolError propagated raw - and
+        cmd_scan catches only StashError, so a flaky connection part-way
+        through a scan gave the user a traceback instead of a sentence.
+        """
+        try:
+            return request()
+        except httpx.HTTPError as e:
+            raise StashError(
+                f"Could not reach the stash API ({type(e).__name__}): {e}"
+            ) from None
+
 
 @dataclass
 class Tab:
@@ -84,11 +99,11 @@ class StashClient(_PolicyTracking):
 
     def _get(self, path: str) -> dict:
         self.limiter.wait(self._policy)
-        resp = self._client.get(f"{API_BASE}{path}")
+        resp = self._send(lambda: self._client.get(f"{API_BASE}{path}"))
         self._observe(resp)
         if resp.status_code == 429:
             self.limiter.wait(self._policy)
-            resp = self._client.get(f"{API_BASE}{path}")
+            resp = self._send(lambda: self._client.get(f"{API_BASE}{path}"))
             self._observe(resp)
         if resp.status_code == 401:
             raise StashError("Access token rejected (401). Run `poescan login` again.")
@@ -200,7 +215,7 @@ class LegacyStashClient(_PolicyTracking):
         params.setdefault("accountName", self.account_name)
         params.setdefault("league", self.league)
         params.setdefault("realm", self.realm)
-        resp = self._client.get(self.BASE, params=params)
+        resp = self._send(lambda: self._client.get(self.BASE, params=params))
         self._observe(resp)
         if resp.status_code == 429:
             # observe() has already recorded the penalty, so wait() now sleeps
@@ -210,7 +225,7 @@ class LegacyStashClient(_PolicyTracking):
             # The OAuth client has always done this; the POESESSID path is the
             # one most installs use, since GGG stopped issuing OAuth clients.
             self.limiter.wait(self._policy)
-            resp = self._client.get(self.BASE, params=params)
+            resp = self._send(lambda: self._client.get(self.BASE, params=params))
             self._observe(resp)
         if resp.status_code == 403:
             raise StashError(

@@ -54,6 +54,9 @@ class FakeTrade:
         "chaos-amulet": (600, [1.0, 1.0, 2.0]),
     }
 
+    # Item ids the market check should fail on, for testing the failure path.
+    FAIL: set = set()
+
     def __init__(self, *a, **kw):
         self.checks = 0
 
@@ -71,6 +74,10 @@ class FakeTrade:
 
     def price_check(self, item, verdict, sample=10):
         self.checks += 1
+        if item.id in self.FAIL:
+            r = MarketResult(total=0)
+            r.error = "search failed: ConnectError"
+            return r
         total, prices = self.ANSWERS.get(item.id, (0, []))
         r = MarketResult(total=total, query_url=f"https://example.test/{item.id}")
         r.filters_used = ["life >= 80"]
@@ -256,6 +263,44 @@ def test_features_are_backfilled_onto_older_checks(stubbed, cfg, index):
     again = scan(cfg, token=None, **kw)
     assert again.market_checks == 0  # backfill must not cost an API call
     assert _cached("tailwind-boots").payload["item"]["base_type"]
+
+
+def test_a_failed_market_check_is_not_cached(stubbed, cfg, index, monkeypatch):
+    """`error` is not persisted, so a cached failure reads back as total=0 -
+    which interest scores at 48 as "possibly scarce". One ConnectError would
+    promote a junk item into the top results for the whole cache lifetime."""
+    import poescan.cache as cache_mod
+
+    monkeypatch.setattr(FakeTrade, "FAIL", {"chaos-amulet"})
+    scan(cfg, token=None, index=index, ruleset=Ruleset.load(), tabs_wanted=["dump1"])
+
+    with cache_mod.Cache() as cache:
+        assert cache.get_check("chaos-amulet", "Allflame", 72.0) is None
+        assert cache.get_check("tailwind-boots", "Allflame", 72.0) is not None
+
+
+def test_a_failed_market_check_is_retried_on_the_next_scan(stubbed, cfg, index, monkeypatch):
+    """The point of not caching it: the item gets another chance."""
+    kw = dict(index=index, ruleset=Ruleset.load(), tabs_wanted=["dump1"])
+    monkeypatch.setattr(FakeTrade, "FAIL", {"chaos-amulet"})
+    first = scan(cfg, token=None, **kw)
+
+    monkeypatch.setattr(FakeTrade, "FAIL", set())
+    second = scan(cfg, token=None, **kw)
+
+    assert second.market_checks == 1, "only the failure should be re-checked"
+    assert first.cache_hits == 0
+    amulet = next(c for c in second.candidates if c.item.id == "chaos-amulet")
+    assert amulet.market.total == 600 and not amulet.market.error
+
+
+def test_a_failed_check_does_not_read_back_as_scarce(stubbed, cfg, index, monkeypatch):
+    """The specific false signal: interest 48 beats a real 40c item."""
+    monkeypatch.setattr(FakeTrade, "FAIL", {"chaos-amulet"})
+    rep = scan(cfg, token=None, index=index, ruleset=Ruleset.load(), tabs_wanted=["dump1"])
+    amulet = next(c for c in rep.candidates if c.item.id == "chaos-amulet")
+    # An errored result falls back to the triage score, not the scarcity bonus.
+    assert amulet.interest == amulet.verdict.score
 
 
 def test_observations_expose_features_paired_with_outcome(stubbed, cfg, index):

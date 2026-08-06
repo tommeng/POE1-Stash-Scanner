@@ -122,6 +122,29 @@ _SCALARS = {
 }
 
 
+# Every key `evaluate_condition` below understands. `validate-rules` checks the
+# ruleset against these rather than keeping its own list, because the two did
+# drift: `mod_matches` was added here and never added there, so the eleven
+# highest-scoring rules in the ruleset went unvalidated. A condition key that
+# is not in this set matches nothing and fails silently, forever.
+CONDITION_VALUE_KEYS = frozenset(
+    {
+        "pseudo",
+        "mod", "mod_any", "mod_matches",
+        "stat", "stat_any",
+        "flag",
+        "base", "base_any", "base_matches",
+        "category",
+        *_SCALARS,
+    }
+)
+CONDITION_MODIFIER_KEYS = frozenset({"min", "max", "abs", "is"})
+CONDITION_KEYS = CONDITION_VALUE_KEYS | CONDITION_MODIFIER_KEYS
+
+FLAG_NAMES = frozenset(_FLAGS)
+PSEUDO_NAMES = frozenset(_PSEUDO_FIELDS)
+
+
 def _in_range(value: float, spec) -> bool:
     if isinstance(spec, (int, float)):
         return value >= float(spec)
