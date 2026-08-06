@@ -93,8 +93,25 @@ Two commands exist to replace them with evidence.
 `scanner._features` now records the item that produced each one — base, ilvl, flags, mods,
 `rules_hit`. `analyse` reports, per rule and per base, the price distribution of the items it
 fired on. Free, offline, and it compounds with every scan. Checks written before feature logging
-carry no item side; `Cache.backfill_features` labels them on the next cache hit, so one ordinary
+carry no item side; `Cache.label_features` labels them on the next cache hit, so one ordinary
 scan over the same tabs retro-labels the whole cache for zero API calls.
+
+Two properties of that instrument are load-bearing, and it misled for months without them:
+
+**Rules are judged on their tail, not their median.** Triage is a filter, and a filter is judged by
+what it wrongly discards — a different question from what its typical item is worth, with a
+different answer. Of the 16 observations worth 50c+, **12 scored in the lowest band**, and the most
+valuable item in the set (820c) scored exactly `promote_score`. So every table in `calibration.py`
+reports `n`, `median`, `best` and `>=50c` together and ranks on tail count. `analyse` also prints
+what raising `promote_score` would cost, as a measured number.
+
+**A rule id means nothing without the ruleset that defined it.** `triage.fingerprint` hashes the
+`rules`, `veto`, `promote_score` and `min_ilvl` (not `max_market_checks` — a budget knob must not
+orphan evidence), and every observation is stamped with it. `analyse` sets aside observations from
+other rulesets by default and says so; `--all-versions` pools them with a warning. `label_features`
+re-labels a stale row on a cache hit, keeping the price and refreshing the explanation, so a rule
+edit no longer strands everything measured before it. The maths is in `calibration.py`, separate
+from the command that renders it, and tested — it is the instrument the scores get corrected by.
 
 **`survey-bases`** measures what a base is worth on its own. It queries **white (normal rarity)
 influenced** bases, and that specific choice is the entire finding — four other designs were
@@ -131,11 +148,14 @@ Discrete work is tracked in GitHub issues. This section is for the opposite: thi
 that look actionable and are not, because the evidence is not there yet. Each has
 already tempted someone once.
 
-- **`fractured` scores 16 and its items median 1c.** Seven observations, and bimodal:
-  `1c, 1c, 1c, 1c, 4.5c, 100c, 202.5c`. The median says delete it, the tail says no.
-  This is the same shape that made deleting `very-high-life` look correct. Splitting
-  will not help either, since `fractured` is not nested. It needs more data, or
-  qualifying by *what* was fractured.
+- **~~`fractured` scores 16 and its items median 1c.~~** *Resolved by measuring it
+  correctly rather than by more data.* The seven observations are
+  `1c, 1c, 1c, 1c, 4.5c, 100c, 202.5c` — median 1c, but two of seven clear 50c
+  against a 5c baseline. It was never short of evidence; a median column simply
+  cannot see what the decision turns on. Keep the rule. The open question is now
+  the narrower one: whether qualifying by *what* was fractured beats the flat 16.
+  Note the general lesson, which applies to several entries below — check the
+  statistic before concluding the sample is thin.
 - **Base-type rules are not yet justified.** `base-values` gives good per-base numbers,
   but it prices *crafting bases* — white influenced items at ilvl 82–86. Triage asks a
   different question: does this base make a **rolled rare** worth more. Nothing measures

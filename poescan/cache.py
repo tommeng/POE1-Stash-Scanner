@@ -34,6 +34,13 @@ priors; this is what would let them be measured instead. Written by
 ``scanner._features``; the cache itself stays dependency-free and treats it as
 an opaque dict.
 
+It carries a ``ruleset`` fingerprint, and ``label_features`` rewrites the whole
+``item`` blob when that fingerprint goes stale. The rule ids in ``rules_hit``
+are only meaningful next to the ruleset that defined them, and rules do get
+retuned and split - at which point every earlier observation silently describes
+rules that no longer exist. Re-labelling on a cache hit is free and keeps the
+price observation while bringing its explanation up to date.
+
 Note this is one row per item (upsert on ``item_id``), so a re-check replaces
 the earlier observation rather than appending to it. That is the right
 behaviour for a cache and adequate for calibration - each item is its own data
@@ -162,12 +169,22 @@ class Cache:
         )
         self.conn.commit()
 
-    def backfill_features(self, item_id: str, league: str, features: dict) -> bool:
-        """Attach item features to a check that was stored without them.
+    def label_features(self, item_id: str, league: str, features: dict) -> bool:
+        """Attach current item features to a stored check. Returns True if written.
 
-        Rows written before feature logging existed still hold a perfectly good
-        market observation; this fills in the item side so the accumulated
-        cache becomes usable as calibration data rather than starting empty.
+        Writes in two cases, both on a cache hit that costs no API call:
+
+        *Absent* - rows written before feature logging existed still hold a
+        perfectly good market observation, so filling in the item side makes the
+        accumulated cache usable as calibration data rather than starting empty.
+
+        *Stale* - the stored label was written under a different ruleset, so its
+        ``rules_hit`` describes rules that may no longer exist. The item itself
+        has not changed, and the caller's features were just derived from it by
+        the current ruleset, so re-labelling is a straight upgrade: the price
+        observation is kept and its explanation is brought up to date. Without
+        this, editing a rule permanently orphans every observation collected
+        before the edit.
 
         Deliberately does *not* touch ``checked_at`` - refreshing that on every
         cache hit would make a row immortal and the item would never be
@@ -183,7 +200,8 @@ class Cache:
             payload = json.loads(row["payload"] or "{}")
         except json.JSONDecodeError:
             payload = {}
-        if payload.get("item"):
+        stored = payload.get("item") or {}
+        if stored and stored.get("ruleset") == features.get("ruleset"):
             return False
         payload["item"] = features
         self.conn.execute(

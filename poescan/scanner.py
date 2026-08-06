@@ -252,8 +252,10 @@ def scan(
                         c.from_cache = True
                         report.cache_hits += 1
                         # Costs no API call, and salvages checks stored before
-                        # feature logging existed.
-                        cache.backfill_features(c.item.id, cfg.league, _features(c.verdict))
+                        # feature logging existed - or under an older ruleset,
+                        # since the verdict in hand was scored by the current
+                        # one against the same unchanged item.
+                        cache.label_features(c.item.id, cfg.league, _features(c.verdict, ruleset))
                         continue
                     if checked >= cap:
                         report.notes.append(
@@ -271,7 +273,9 @@ def scan(
                     # would promote a junk item into the top results and not be
                     # retried for the full cache lifetime.
                     if not c.market.error:
-                        cache.put_check(c.item.id, cfg.league, c.market, _features(c.verdict))
+                        cache.put_check(
+                            c.item.id, cfg.league, c.market, _features(c.verdict, ruleset)
+                        )
                     checked += 1
                 report.market_checks = checked
     finally:
@@ -283,7 +287,7 @@ def scan(
     return report
 
 
-def _features(verdict: Verdict) -> dict:
+def _features(verdict: Verdict, ruleset: Ruleset) -> dict:
     """The item side of a price observation, for later calibration.
 
     Every scan already pays for real market data; recording what the item
@@ -293,10 +297,13 @@ def _features(verdict: Verdict) -> dict:
     Mods are stored in template form alongside the rolled value, because the
     template is the unit rules match on and the value is what thresholds
     compare. ``rules_hit`` is kept so a rule's score can later be checked
-    against what the items it fired on turned out to be worth.
+    against what the items it fired on turned out to be worth - and it is
+    stamped with ``ruleset``, because a rule id only means something in the
+    company of the ruleset that defined it. See ``triage.fingerprint``.
     """
     it = verdict.item
     return {
+        "ruleset": ruleset.fingerprint,
         "base_type": it.base_type,
         "category": it.category,
         "ilvl": it.ilvl,

@@ -338,6 +338,52 @@ def test_backfill_does_not_refresh_cache_age(stubbed, cfg, index):
     assert _cached("tailwind-boots").checked_at == before
 
 
+def _retuned_ruleset() -> Ruleset:
+    """The default ruleset with one scoring decision changed."""
+    import yaml
+
+    from poescan.triage import DEFAULT_RULES
+
+    data = yaml.safe_load(DEFAULT_RULES.read_text())
+    data["settings"]["promote_score"] = 9  # still promotes the fixtures
+    return Ruleset(data)
+
+
+def test_observations_carry_the_ruleset_that_labelled_them(stubbed, cfg, index):
+    """A rule id means nothing without the ruleset that defined it."""
+    ruleset = Ruleset.load()
+    scan(cfg, token=None, index=index, ruleset=ruleset, tabs_wanted=["dump1"])
+    assert _cached("tailwind-boots").payload["item"]["ruleset"] == ruleset.fingerprint
+
+
+def test_a_rule_edit_does_not_orphan_earlier_observations(stubbed, cfg, index):
+    """Re-labelling a cache hit costs nothing and keeps the price observation.
+
+    Without this, every rule edit permanently strands the evidence gathered
+    before it: the price stays valid but its `rules_hit` describes rules that
+    may no longer exist. That really happened - splitting the nested life bands
+    left 27 observations claiming to have hit two rules that are now disjoint.
+    """
+    scan(cfg, token=None, index=index, ruleset=Ruleset.load(), tabs_wanted=["dump1"])
+    priced_at = _cached("tailwind-boots").payload["listings"]
+
+    retuned = _retuned_ruleset()
+    again = scan(cfg, token=None, index=index, ruleset=retuned, tabs_wanted=["dump1"])
+
+    assert again.market_checks == 0, "re-labelling must not spend an API call"
+    payload = _cached("tailwind-boots").payload
+    assert payload["item"]["ruleset"] == retuned.fingerprint
+    assert payload["listings"] == priced_at, "the observed price must survive re-labelling"
+
+
+def test_relabelling_leaves_the_cache_age_alone(stubbed, cfg, index):
+    """Same reason as the backfill case: a re-labelled row must still expire."""
+    scan(cfg, token=None, index=index, ruleset=Ruleset.load(), tabs_wanted=["dump1"])
+    before = _cached("tailwind-boots").checked_at
+    scan(cfg, token=None, index=index, ruleset=_retuned_ruleset(), tabs_wanted=["dump1"])
+    assert _cached("tailwind-boots").checked_at == before
+
+
 # -- caveats on a cached price ----------------------------------------------
 #
 # `relaxed` and `tightened` say the query was not like-for-like: a widened one
