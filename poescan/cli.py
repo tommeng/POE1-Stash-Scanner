@@ -47,6 +47,7 @@ from .triage import (
     FLAG_NAMES,
     PSEUDO_NAMES,
     Ruleset,
+    ambiguous_conditions,
     assess,
 )
 
@@ -354,7 +355,10 @@ def cmd_diagnose(args) -> int:
     except AuthError as e:
         return _err(str(e))
 
-    ruleset = Ruleset.load(args.rules)
+    try:
+        ruleset = Ruleset.load(args.rules)
+    except (OSError, ValueError) as e:
+        return _err(f"Could not load ruleset: {e}")
     try:
         index = load_stat_index()
     except Exception as e:  # noqa: BLE001 - httpx, or a malformed payload
@@ -547,6 +551,13 @@ def cmd_validate(args) -> int:
                 if cat not in CATEGORY_LABELS:
                     problems.append((rid, cat, "unknown category id"))
 
+    # `Ruleset.load` refuses these outright, so reporting them here is what
+    # turns a traceback from `scan` into a listed finding - and lists all of
+    # them at once rather than just the first.
+    for ambiguous in ambiguous_conditions(data):
+        checked += 1
+        problems.append((ambiguous.rule_id, ambiguous.where, ambiguous.reason))
+
     if problems:
         console.print(f"[red]{len(problems)} problem(s)[/] in {checked} references:\n")
         for rid, ref, why in problems:
@@ -734,7 +745,10 @@ def cmd_analyse(args) -> int:
         t.add_row(rid, str(len(prices)), _price_cell(_median(prices), baseline))
     console.print(t)
 
-    ruleset = Ruleset.load(args.rules)
+    try:
+        ruleset = Ruleset.load(args.rules)
+    except (OSError, ValueError) as e:
+        return _err(f"Could not load ruleset: {e}")
     never = [str(r.get("id", "?")) for r in ruleset.rules if str(r.get("id", "?")) not in by_rule]
     if never:
         console.print(

@@ -4,11 +4,28 @@ Dump tabs are append-mostly: rescanning one re-presents mostly the same items.
 Since an item's mods never change, a market check stays useful for days, and
 caching it is what makes repeated scans affordable against the API budget.
 
-The ``payload`` column is JSON and holds three keys:
+The ``payload`` column is JSON and holds five keys:
 
-    filters   the human-readable list of what the trade query compared on
-    listings  the sampled listings, enough to recompute cheapest/median
-    item      the item's own features - base type, ilvl, flags, mods
+    filters    the human-readable list of what the trade query compared on
+    listings   the sampled listings, enough to recompute cheapest/median
+    item       the item's own features - base type, ilvl, flags, mods
+    relaxed    the strict query found nothing and was widened to one mod
+    tightened  the strict query found thousands and was narrowed
+
+``relaxed`` and ``tightened`` are caveats on the price, not details of how it
+was fetched: a widened query priced the item's *strongest mod alone*, so its
+median is not a like-for-like comparison and the report says so. Persisting
+them is what stops a cached check from making a quieter, more confident claim
+than the live one did - and with a 72h TTL most reads are cache hits.
+
+Rows written before they were persisted have neither key, and unlike ``item``
+there is nothing to backfill from: the flag was never recorded and the query
+that would reveal it is gone. Such a row therefore reads as ``relaxed=False``,
+which is the old bug living out the rest of its TTL. That is accepted rather
+than fixed, because invalidating good price observations to re-earn a caveat
+costs API budget. But note what the shape is - an absent value read as a
+negative one, indistinguishable from a recorded negative. It ages out on its
+own within 72 hours; nothing else in the payload gets to be read that way.
 
 ``item`` exists because every scan already pays for real price observations,
 and pairing them with the item that produced them is the only cheap source of
@@ -135,6 +152,10 @@ class Cache:
                             for l in result.listings
                         ],
                         "item": features or {},
+                        # Caveats on the price itself, so they have to survive
+                        # the round trip or the cached report overstates.
+                        "relaxed": bool(result.relaxed),
+                        "tightened": bool(result.tightened),
                     }
                 ),
             ),

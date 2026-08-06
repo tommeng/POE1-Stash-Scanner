@@ -338,6 +338,94 @@ def test_backfill_does_not_refresh_cache_age(stubbed, cfg, index):
     assert _cached("tailwind-boots").checked_at == before
 
 
+# -- caveats on a cached price ----------------------------------------------
+#
+# `relaxed` and `tightened` say the query was not like-for-like: a widened one
+# priced the item's strongest mod alone. They were not persisted, so with a 72h
+# TTL most reports presented a widened price as comparable.
+
+
+def _flagging_trade(monkeypatch, item_id: str, caveat: str) -> None:
+    """Make FakeTrade report `caveat` on one item, as a real refinement would."""
+    original = FakeTrade.price_check
+
+    def price_check(self, item, verdict, sample=10):
+        result = original(self, item, verdict, sample)
+        if item.id == item_id:
+            setattr(result, caveat, True)
+        return result
+
+    monkeypatch.setattr(FakeTrade, "price_check", price_check)
+
+
+def _candidate(rep, item_id: str):
+    return next(c for c in rep.candidates if c.item.id == item_id)
+
+
+@pytest.mark.parametrize("caveat", ["relaxed", "tightened"])
+def test_a_query_caveat_survives_the_cache(stubbed, cfg, index, monkeypatch, caveat):
+    """Round trip: through put_check and back out of the cache-hit path."""
+    kw = dict(index=index, ruleset=Ruleset.load(), tabs_wanted=["dump1"])
+    _flagging_trade(monkeypatch, "tailwind-boots", caveat)
+
+    live = _candidate(scan(cfg, token=None, **kw), "tailwind-boots")
+    assert not live.from_cache and getattr(live.market, caveat) is True
+
+    cached = _candidate(scan(cfg, token=None, **kw), "tailwind-boots")
+    assert cached.from_cache, "the second scan must be answered from the cache"
+    assert getattr(cached.market, caveat) is True
+
+
+def test_the_cached_report_still_shows_the_widened_query_caveat(
+    stubbed, cfg, index, monkeypatch, tmp_path
+):
+    """What the user actually sees, which is the point of persisting it."""
+    kw = dict(index=index, ruleset=Ruleset.load(), tabs_wanted=["dump1"])
+    _flagging_trade(monkeypatch, "tailwind-boots", "relaxed")
+    scan(cfg, token=None, **kw)
+
+    from_cache = scan(cfg, token=None, **kw)
+    assert from_cache.market_checks == 0
+    html = report_mod.render(from_cache, tmp_path / "cached.html").read_text()
+    assert "widened to the strongest mod alone" in html
+
+
+def test_an_ordinary_cached_check_carries_no_caveat(stubbed, cfg, index):
+    """The flags must not arrive set on every cached row."""
+    kw = dict(index=index, ruleset=Ruleset.load(), tabs_wanted=["dump1"])
+    scan(cfg, token=None, **kw)
+    boots = _candidate(scan(cfg, token=None, **kw), "tailwind-boots")
+    assert boots.from_cache
+    assert boots.market.relaxed is False and boots.market.tightened is False
+
+
+def test_a_check_stored_before_the_caveats_reads_as_uncaveated(stubbed, cfg, index):
+    """The accepted limitation, pinned so it stays a known one.
+
+    Unlike item features there is nothing to backfill from - the flag was never
+    recorded and the query that would reveal it is gone - so an old row reads as
+    "not widened". That is the old bug living out the rest of its 72h TTL rather
+    than being fixed, and it must at least not break the read path.
+    """
+    import poescan.cache as cache_mod
+
+    kw = dict(index=index, ruleset=Ruleset.load(), tabs_wanted=["dump1"])
+    scan(cfg, token=None, **kw)
+
+    with cache_mod.Cache() as cache:  # strip the keys, as an old row would lack them
+        old = {k: v for k, v in _cached("tailwind-boots").payload.items()
+               if k not in ("relaxed", "tightened")}
+        cache.conn.execute(
+            "UPDATE market_check SET payload = ? WHERE item_id = ?",
+            (json.dumps(old), "tailwind-boots"),
+        )
+        cache.conn.commit()
+
+    boots = _candidate(scan(cfg, token=None, **kw), "tailwind-boots")
+    assert boots.from_cache
+    assert boots.market.relaxed is False and boots.market.tightened is False
+
+
 def test_unmatched_tab_name_reports_available_tabs(stubbed, cfg, index):
     rep = scan(cfg, token=None, index=index, ruleset=Ruleset.load(), tabs_wanted=["nope"])
     assert rep.candidates == []

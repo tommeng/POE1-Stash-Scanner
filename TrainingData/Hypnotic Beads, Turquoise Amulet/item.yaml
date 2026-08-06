@@ -1,0 +1,82 @@
+# Transcribed from the screenshots in this folder. See TrainingData/README.md.
+schema: 1
+
+source:
+  # The observation came from outside poescan entirely, so it is evidence
+  # *about* poescan rather than an echo of it.
+  kind: independent
+  independent_of_poescan: true
+  origin: in-game item tooltip; Awakened PoE Trade price-check overlay
+  screenshots:
+    - Screenshot 2026-08-06 001009.png   # in-game tooltip
+    - Screenshot 2026-08-06 001029.png   # price-check overlay
+  observed_on: 2026-08-06
+  league: Allflame
+
+item:
+  name: Hypnotic Beads
+  base_type: Turquoise Amulet
+  category: accessory.amulet
+  ilvl: 84
+  influences: []
+  corrupted: false          # the overlay says "Not Corrupted"
+  fractured: false
+  synthesised: false
+  # Keys mirror scanner._features: t=template, id=trade stat id, v=rolled
+  # value, d=domain. The first line sits above the tooltip's separator, so it
+  # is the base's implicit, not a rolled explicit.
+  mods:
+    - {t: "+# to Dexterity and Intelligence", id: implicit.stat_2300185227, v: 18, d: implicit}
+    - {t: "+# to Dexterity",                  id: explicit.stat_3261801346, v: 40, d: explicit}
+    - {t: "#% increased Spell Damage",        id: explicit.stat_2974417149, v: 24, d: explicit}
+    - {t: "+# to maximum Energy Shield",      id: explicit.stat_3489782002, v: 37, d: explicit}
+    - {t: "+#% to Cold Resistance",           id: explicit.stat_4220027924, v: 47, d: explicit}
+    - {t: "+#% to Lightning Resistance",      id: explicit.stat_1671376347, v: 37, d: explicit}
+
+triage:
+  # Derived by running this item through poescan.triage.assess, not asserted
+  # by hand. Re-derive after any rule edit: `tests/test_scoring.py` pins it.
+  promoted: true
+  score: 10
+  promote_score: 10
+  rules_hit: [attribute-stacking]
+  ruleset: poescan/rules/default.yaml
+  scored_on: 2026-08-06
+  note: >
+    The margin is zero. 58 Dex + 18 Int = 76 attributes clears
+    attribute-stacking's min of 70, and nothing else fires: total resistance is
+    84 against high-total-res's 130, and caster-spell-damage is restricted to
+    weapon categories so 24% never reaches its min of 80 anyway. A single
+    point off attribute-stacking, or one more point on its threshold, turns a
+    multi-divine item into a false negative.
+
+market:
+  # Field names mirror the cache's market_check payload. Prices are raw
+  # {amount, currency} pairs and are deliberately NOT converted: the
+  # divine:chaos rate moves within a league, so a chaos figure baked in today
+  # silently corrupts every later comparison. trade.Listing.chaos_value is
+  # null for every non-chaos currency for the same reason, and no cheapest or
+  # median is recorded here because this sample is mixed-currency.
+  total: 13
+  # The overlay's filters, not poescan's - it compared 4 of the item's 7 stats,
+  # using per-attribute pseudos where poescan would send pseudo_total_all_attributes.
+  # So this count answers the overlay's question, not the one poescan asks.
+  filters:
+    - elemental resistance >= 82
+    - total Dexterity >= 54
+    - total Intelligence >= 16
+    - increased Spell Damage >= 23
+  listings:
+    - {amount: 20, currency: chaos,  ilvl: 84, listed: 4 days ago}
+    - {amount: 20, currency: chaos,  ilvl: 85, listed: 7 days ago}
+    - {amount: 70, currency: chaos,  ilvl: 85, listed: 7 hr ago}
+    - {amount: 75, currency: chaos,  ilvl: 85, listed: 17 hr ago}
+    - {amount: 1,  currency: divine, ilvl: 85, listed: 8 days ago}
+    - {amount: 1,  currency: divine, ilvl: 84, listed: 2 days ago}
+    - {amount: 1,  currency: divine, ilvl: 84, listed: 5 hr ago}
+    - {amount: 1,  currency: divine, ilvl: 85, listed: 19 hr ago}
+    - {amount: 3,  currency: divine, ilvl: 84, listed: 1 day ago}
+    - {amount: 5,  currency: divine, ilvl: 85, listed: 16 hr ago}
+    - {amount: 5,  currency: divine, ilvl: 84, listed: 1 day ago}
+    - {amount: 7,  currency: divine, ilvl: 84, listed: 2 days ago}
+    - {amount: 10, currency: divine, ilvl: 85, listed: 1 hr ago}

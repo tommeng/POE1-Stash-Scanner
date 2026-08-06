@@ -1,0 +1,72 @@
+# Transcribed from the screenshots in this folder. See TrainingData/README.md.
+schema: 1
+
+source:
+  # NOT an independent observation. Both screenshots are poescan's own output -
+  # the HTML report and the terminal table - so every number below except the
+  # transcription itself was produced by the thing it would be used to judge.
+  # Counting it as evidence about poescan is circular. It is kept for
+  # regression value: this item must keep being promoted.
+  kind: poescan-report
+  independent_of_poescan: false
+  origin: poescan HTML report; poescan terminal summary
+  screenshots:
+    - Screenshot 2026-08-05 230749.png   # report card
+    - Screenshot 2026-08-05 230810.png   # terminal table
+  observed_on: 2026-08-05
+  league: Allflame
+
+item:
+  name: Death Pace
+  base_type: Phantom Boots
+  category: armour.boots
+  ilvl: 86
+  # The report tags influence, corruption, fracture and synthesis, and marks
+  # implicit and crafted mods; none of those tags appear, so all six mods are
+  # explicit and the flags are false. Sockets, links and quality are not
+  # rendered at all, so they are omitted rather than guessed at.
+  influences: []
+  corrupted: false
+  fractured: false
+  synthesised: false
+  mods:
+    - {t: "+#% chance to Suppress Spell Damage",  id: explicit.stat_3680664274, v: 10, d: explicit}
+    - {t: "#% increased Evasion and Energy Shield", id: explicit.stat_1999113824, v: 53, d: explicit}
+    - {t: "+# to maximum Mana",                   id: explicit.stat_1050105434, v: 73, d: explicit}
+    - {t: "+#% to Fire Resistance",               id: explicit.stat_3372524247, v: 35, d: explicit}
+    - {t: "+#% to Lightning Resistance",          id: explicit.stat_1671376347, v: 29, d: explicit}
+    - {t: "#% increased Movement Speed",          id: explicit.stat_2250533757, v: 35, d: explicit}
+
+triage:
+  # Derived by re-running this item through poescan.triage.assess, which agrees
+  # with the report screenshot: 12 + 12 = 24, both movement-speed rules.
+  promoted: true
+  score: 24
+  promote_score: 10
+  rules_hit: [boots-movespeed-30, boots-movespeed-35]
+  ruleset: poescan/rules/default.yaml
+  scored_on: 2026-08-06
+  note: >
+    The two movement-speed rules are nested rather than banded - 35% satisfies
+    both - so this roll is scored twice. Recorded as observed; not acted on.
+  # The report's own headline number, kept because it is what the user saw. It
+  # is dominated by the market result, not by the triage score.
+  reported_interest: 114
+  stash_note: ~price 10 chaos
+  position: col 18, row 23
+
+market:
+  # poescan's own figures, restated. total/cheapest/median mirror the cache's
+  # market_check columns, which are chaos-denominated; the median is taken over
+  # the chaos-priced subset only, since trade.Listing.chaos_value is null for
+  # every other currency. The individual listings were never captured, so
+  # `listings` is null - an empty list would wrongly read as "none existed".
+  total: 16
+  cheapest: 20
+  median: 726
+  filters:
+    - 35% increased Movement Speed
+    - elemental resistance >= 58
+    - +73 to maximum Mana
+    - 53% increased Evasion and Energy Shield
+  listings: null

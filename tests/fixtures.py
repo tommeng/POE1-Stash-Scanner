@@ -18,6 +18,12 @@ WAND_ICON = (
     "https://web.poecdn.com/gen/image/WzI1LDE0LHsiZiI6IjJESXRlbXMvV2VhcG9ucy9PbmVIYW5kV2Vh"
     "cG9ucy9XYW5kcy9XYW5kMSIsInciOjEsImgiOjMsInNjYWxlIjoxfV0/def/Wand1.png"
 )
+# The art path only feeds category classification, so one generic amulet icon
+# serves every amulet fixture regardless of its base type.
+AMULET_ICON = (
+    "https://web.poecdn.com/gen/image/WzI1LDE0LHsiZiI6IjJESXRlbXMvQW11bGV0cy9BbXVsZXQ1Iiwi"
+    "dyI6MSwiaCI6MSwic2NhbGUiOjF9XQ/x/Amulet5.png"
+)
 HELM_ICON = (
     "https://web.poecdn.com/gen/image/WzI1LDE0LHsiZiI6IjJESXRlbXMvQXJtb3Vycy9IZWxtZXRzL0hl"
     "bG1ldEludDEiLCJ3IjoyLCJoIjoyLCJzY2FsZSI6MX1d/ghi/HelmetInt1.png"
@@ -26,11 +32,15 @@ HELM_ICON = (
 
 def item(**kw) -> dict:
     """A rare item with sensible defaults, overridable per test."""
+    # Read out first: the dict literal below pops `baseType` before `typeLine`
+    # is computed, so reading it back out of `kw` there always missed and every
+    # non-ring fixture was built with typeLine "Two-Stone Ring".
+    base_type = kw.pop("baseType", "Two-Stone Ring")
     base = {
         "id": kw.pop("id", "test-item"),
         "name": kw.pop("name", "Test Item"),
-        "baseType": kw.pop("baseType", "Two-Stone Ring"),
-        "typeLine": kw.pop("typeLine", None) or kw.get("baseType", "Two-Stone Ring"),
+        "baseType": base_type,
+        "typeLine": kw.pop("typeLine", None) or base_type,
         "icon": kw.pop("icon", RING_ICON),
         "ilvl": kw.pop("ilvl", 84),
         "rarity": kw.pop("rarity", "Rare"),
@@ -156,7 +166,7 @@ CHAOS_RES_AMULET = item(
     id="chaos-amulet",
     name="Blight Heart",
     baseType="Marble Amulet",
-    icon="https://web.poecdn.com/gen/image/WzI1LDE0LHsiZiI6IjJESXRlbXMvQW11bGV0cy9BbXVsZXQ1IiwidyI6MSwiaCI6MSwic2NhbGUiOjF9XQ/x/Amulet5.png",
+    icon=AMULET_ICON,
     ilvl=86,
     explicitMods=[
         "+96 to maximum Life",
@@ -164,6 +174,28 @@ CHAOS_RES_AMULET = item(
         "+40% to Fire Resistance",
         "+38% to Cold Resistance",
         "+35% to Lightning Resistance",
+    ],
+)
+
+
+# A real item, transcribed from
+# `TrainingData/Hypnotic Beads, Turquoise Amulet/item.yaml`, whose comparables
+# on the trade site ran from 20 chaos to 10 divine. It clears promote_score by
+# a margin of exactly zero, which is what makes it the guard against the
+# ruleset drifting tight. Keep the two in step if either is edited.
+HYPNOTIC_BEADS_AMULET = item(
+    id="hypnotic-beads",
+    name="Hypnotic Beads",
+    baseType="Turquoise Amulet",
+    icon=AMULET_ICON,
+    ilvl=84,
+    implicitMods=["+18 to Dexterity and Intelligence"],
+    explicitMods=[
+        "+40 to Dexterity",
+        "24% increased Spell Damage",
+        "+37 to maximum Energy Shield",
+        "+47% to Cold Resistance",
+        "+37% to Lightning Resistance",
     ],
 )
 

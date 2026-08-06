@@ -239,6 +239,13 @@ def scan(
                             total=cached.total,
                             query_url=cached.query_url,
                             filters_used=cached.payload.get("filters") or [],
+                            # Caveats on what the price means, not trivia about
+                            # how it was fetched: a widened query priced the
+                            # strongest mod alone. Dropping them here made the
+                            # cached report claim more than the live one did.
+                            # Absent on rows predating this - see cache.py.
+                            relaxed=bool(cached.payload.get("relaxed")),
+                            tightened=bool(cached.payload.get("tightened")),
                         )
                         # Restore the numbers the properties would otherwise derive.
                         c.market.listings = _listings_from_payload(cached.payload)

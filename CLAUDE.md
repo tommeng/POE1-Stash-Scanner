@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 uv sync                                   # install
-uv run pytest                             # 273 tests, ~3.9s (fully offline)
+uv run pytest                             # 294 tests, ~3.9s (fully offline)
 uv run pytest tests/test_ratelimit.py     # one file
 uv run pytest -k test_reduced_resolves    # one test by name
 uv run poescan validate-rules             # every mod string and base name in the ruleset really exists
@@ -144,6 +144,11 @@ already tempted someone once.
 - **The resistance bands have never fired on a priced item.** `high-total-res` and
   `huge-total-res` were split into disjoint bands so they *can* be measured, which is
   not the same as having been measured. Their scores remain unevidenced priors.
+- **`attribute-stacking`'s threshold of 70 is the only thing promoting a multi-divine amulet.**
+  The item in `TrainingData/Hypnotic Beads, Turquoise Amulet/` scores exactly `promote_score` on
+  that rule alone — 76 total attributes against a min of 70 — while its 84% total resistance misses
+  `high-total-res`'s 130. A margin of zero on a 1–10 divine item invites moving the threshold down,
+  and one item is not evidence that 70 is wrong. n=1, and it is pinned by a test instead.
 - **Six ring bases return HTTP 503 from GGG consistently** — Dusk, Penumbra, Gloam,
   Tenebrous, Shadowed, Nameless. Identical on retry, and no other base does it. Most
   likely they do not exist in the current league and the API answers 503 rather than
@@ -223,6 +228,13 @@ rare gear and are excluded unless named explicitly.
 
 - `tests/data/real_rings.json` holds ten rings scraped from live trade, all listed at 1 chaos.
   They are the regression guard against the ruleset drifting loose. Re-run after any rule edit.
+- **`F.HYPNOTIC_BEADS_AMULET` is the guard in the other direction** — against the ruleset drifting
+  *tight*. A real amulet whose comparables ran from 20 chaos to 10 divine, and which clears
+  `promote_score` by a margin of exactly zero. If a rule edit makes
+  `test_a_known_multi_divine_amulet_is_still_promoted` fail, the edit has introduced a false
+  negative on a multi-divine item. Transcribed in `TrainingData/`; the two are meant to stay in
+  step. Only promotion is asserted, not the score — the score is an observation about a
+  hand-authored prior, not something the ruleset owes.
 - **Trade metadata is vendored** at `tests/data/{stats,items}.json.gz` and the `index` fixture
   reads it from there. It used to read the developer's own `~/.poescan/data` and `skip` when
   cold, so a fresh machine reported green while silently skipping two thirds of the suite.
@@ -245,3 +257,11 @@ Mod strings are *templates* — rolled numbers replaced by `#`, exactly as the t
 `mod_matches` is tested against both the rolled text and the template, so patterns can be written
 either way. Add `abs: true` for mods that roll negative (`-7 to Total Mana Cost of Skills`).
 Always run `poescan validate-rules` after editing.
+
+**One condition names one selector.** `{base: "Opal Ring", ilvl: {min: 84}}` is refused when the
+ruleset loads — write the two as separate entries under `all`, which are ANDed anyway.
+`evaluate_condition` tests selector kinds in a fixed order and returns on the first one present, so
+the form used to evaluate the ilvl and discard the base silently. Rejecting rather than ANDing is
+deliberate: `min`/`max` qualify *whichever* selector is present, so `{pseudo: life, mod: X, min: 90}`
+has no single defensible reading. Aliases of one selector may still share a condition (`mod`
+beside `mod_any`), because `evaluate_condition` genuinely unions those.
