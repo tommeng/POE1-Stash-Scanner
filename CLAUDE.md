@@ -125,6 +125,35 @@ poe.ninja's `count` is a **capped sample** (it saturates at 399), not a listing 
 reintroduces exactly the saturating-denominator error that killed the survey's third design. A zero from a thin
 sample is still a thin sample. `TradeClient.base_value` is kept as the independent spot-check.
 
+### Blocked on measurement — do not act on these yet
+
+Discrete work is tracked in GitHub issues. This section is for the opposite: things
+that look actionable and are not, because the evidence is not there yet. Each has
+already tempted someone once.
+
+- **`fractured` scores 16 and its items median 1c.** Seven observations, and bimodal:
+  `1c, 1c, 1c, 1c, 4.5c, 100c, 202.5c`. The median says delete it, the tail says no.
+  This is the same shape that made deleting `very-high-life` look correct. Splitting
+  will not help either, since `fractured` is not nested. It needs more data, or
+  qualifying by *what* was fractured.
+- **Base-type rules are not yet justified.** `base-values` gives good per-base numbers,
+  but it prices *crafting bases* — white influenced items at ilvl 82–86. Triage asks a
+  different question: does this base make a **rolled rare** worth more. Nothing measures
+  that yet. The feature log is the instrument that could, once bases reach n≥5; 34 sit
+  at n=1 today.
+- **The resistance bands have never fired on a priced item.** `high-total-res` and
+  `huge-total-res` were split into disjoint bands so they *can* be measured, which is
+  not the same as having been measured. Their scores remain unevidenced priors.
+- **Six ring bases return HTTP 503 from GGG consistently** — Dusk, Penumbra, Gloam,
+  Tenebrous, Shadowed, Nameless. Identical on retry, and no other base does it. Most
+  likely they do not exist in the current league and the API answers 503 rather than
+  a proper error. Surfaced honestly rather than guessed at.
+
+The general rule this section exists to enforce: **a thin sample is thin in both
+directions.** A median of 1c over seven items is no more conclusive than a median of
+500c over two, and a *zero* is no exception — the base survey reported Sapphire and Iron
+Rings as "not sold as a base" on n=0, while poe.ninja samples 385 and 152 of them.
+
 ### Mod text ↔ trade stat translation (`tradedata.py`)
 
 The game and the trade site word the same mod differently, in three systematic ways. All are
