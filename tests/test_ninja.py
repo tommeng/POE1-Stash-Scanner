@@ -44,11 +44,35 @@ ROWS = [
 del ROWS[6]["variant"]
 
 
+LEAGUES = [{"id": "Allflame"}, {"id": "Standard"}]
+
+LEAGUES_URL = "https://poe.ninja/poe1/api/economy/leagues"
+OVERVIEW_URL = "https://poe.ninja/poe1/api/economy/stash/current/item/overview"
+
+
+def serve(calls=None, lines=None, leagues=None):
+    """A `_get` stub that answers both endpoints, recording urls into `calls`.
+
+    Dispatching on the url rather than answering everything alike is what lets a
+    test say *which* request was made - the whole of issue #16 is one endpoint
+    being called when it should not be.
+    """
+    rows = ROWS if lines is None else lines
+
+    def _get(url, params=None):
+        if calls is not None:
+            calls.append(url)
+        return (LEAGUES if leagues is None else leagues) if url.endswith("/leagues") \
+            else {"lines": rows}
+
+    return _get
+
+
 @pytest.fixture
 def stubbed(monkeypatch, tmp_path):
     """Serve the rows without touching the network or the real data dir."""
     monkeypatch.setattr(ninja, "DATA_DIR", tmp_path)
-    monkeypatch.setattr(ninja, "_get", lambda url, params=None: {"lines": ROWS})
+    monkeypatch.setattr(ninja, "_get", serve())
     return ROWS
 
 
@@ -107,16 +131,16 @@ def test_a_stale_cache_is_refetched(stubbed, monkeypatch, tmp_path):
     os.utime(cached, (old, old))
 
     calls = []
-    monkeypatch.setattr(ninja, "_get", lambda url, params=None: calls.append(url) or {"lines": ROWS})
+    monkeypatch.setattr(ninja, "_get", serve(calls))
     ninja.base_values("Allflame")
-    assert len(calls) == 1
+    assert OVERVIEW_URL in calls
 
 
 def test_each_league_gets_its_own_cache(stubbed, monkeypatch, tmp_path):
     """A shared key would serve one league's prices for another."""
     ninja.base_values("Allflame")
     other = [_row("Opal Ring", chaosValue=999.0, count=10)]
-    monkeypatch.setattr(ninja, "_get", lambda url, params=None: {"lines": other})
+    monkeypatch.setattr(ninja, "_get", serve(lines=other))
     got = ninja.base_values("Standard")
     assert [v.chaos for v in got] == [999.0]
     assert next(v for v in ninja.base_values("Allflame") if v.name == "Opal Ring").chaos == 11.0
@@ -152,13 +176,59 @@ def test_a_single_listing_is_not_confident(stubbed):
     assert next(v for v in ninja.base_values("Allflame") if v.name == "Opal Ring").confident
 
 
-def test_the_slug_trap_produces_a_real_error(monkeypatch, tmp_path):
-    """The wrong league form answers 200 with nothing, which otherwise reads as
-    'this league has no economy data'."""
+def test_an_empty_payload_for_a_real_league_still_says_so(monkeypatch, tmp_path):
+    """200-with-nothing otherwise reads as 'this league has no economy data'."""
     monkeypatch.setattr(ninja, "DATA_DIR", tmp_path)
-    monkeypatch.setattr(ninja, "_get", lambda url, params=None: {"lines": []})
+    monkeypatch.setattr(ninja, "_get", serve(lines=[]))
     with pytest.raises(ninja.NinjaError, match="not the URL slug"):
-        ninja.fetch_base_types("allflame")
+        ninja.fetch_base_types("Allflame")
+
+
+def test_the_slug_never_reaches_the_api(monkeypatch, tmp_path):
+    """Resolving on the miss closes the slug trap by construction.
+
+    `fetch_base_types` used to forward whatever it was handed, so "allflame"
+    reached poe.ninja and came back 200-with-nothing. It now resolves first, so
+    the request carries the id no matter which spelling the caller used.
+    """
+    monkeypatch.setattr(ninja, "DATA_DIR", tmp_path)
+    sent = []
+
+    def _get(url, params=None):
+        sent.append((url, dict(params or {})))
+        return LEAGUES if url.endswith("/leagues") else {"lines": ROWS}
+
+    monkeypatch.setattr(ninja, "_get", _get)
+    ninja.fetch_base_types("allflame")
+
+    overview = next(p for u, p in sent if u == OVERVIEW_URL)
+    assert overview["league"] == "Allflame", "the id, not the slug the caller passed"
+
+
+def test_a_warm_cache_makes_no_requests_at_all(stubbed, monkeypatch, tmp_path):
+    """Issue #16: resolving eagerly cost one league-list request every call.
+
+    The base-type cache was already honoured, so the command looked cached while
+    still going to the network - which is exactly what the README says it does
+    not do. A warm cache must be silent, not merely cheap.
+    """
+    ninja.base_values("Allflame")  # populate
+    calls = []
+    monkeypatch.setattr(ninja, "_get", serve(calls))
+
+    ninja.base_values("Allflame")
+    ninja.item_types("Allflame")
+    ninja.influences("Allflame")
+
+    assert calls == [], f"warm cache should touch nothing, called {calls}"
+
+
+def test_a_cache_miss_does_resolve_the_league(stubbed, monkeypatch, tmp_path):
+    """The other half: laziness must not become never."""
+    calls = []
+    monkeypatch.setattr(ninja, "_get", serve(calls))
+    ninja.base_values("Allflame")
+    assert calls == [LEAGUES_URL, OVERVIEW_URL]
 
 
 def test_league_resolves_case_insensitively(monkeypatch):
@@ -178,7 +248,7 @@ def test_an_unknown_league_lists_what_is_available(monkeypatch):
 def test_results_are_cached_to_disk(stubbed, monkeypatch, tmp_path):
     ninja.base_values("Allflame")
     calls = []
-    monkeypatch.setattr(ninja, "_get", lambda url, params=None: calls.append(url) or {"lines": ROWS})
+    monkeypatch.setattr(ninja, "_get", serve(calls))
     ninja.base_values("Allflame")
     assert calls == [], "second call should be served from the 24h cache"
 
@@ -186,9 +256,9 @@ def test_results_are_cached_to_disk(stubbed, monkeypatch, tmp_path):
 def test_refresh_bypasses_the_cache(stubbed, monkeypatch, tmp_path):
     ninja.base_values("Allflame")
     calls = []
-    monkeypatch.setattr(ninja, "_get", lambda url, params=None: calls.append(url) or {"lines": ROWS})
+    monkeypatch.setattr(ninja, "_get", serve(calls))
     ninja.base_values("Allflame", force=True)
-    assert len(calls) == 1
+    assert OVERVIEW_URL in calls
 
 
 def test_a_corrupt_cache_is_refetched(stubbed, tmp_path):

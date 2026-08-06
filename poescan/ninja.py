@@ -146,6 +146,9 @@ def resolve_league(name: str) -> str:
     Passing the wrong form is not an error at the API - it answers 200 with an
     empty result - so getting this right here is what stops an empty table being
     mistaken for a league with no economy.
+
+    Costs a request, so ``fetch_base_types`` calls it only when it is about to
+    make one anyway. See the note there.
     """
     available = leagues()
     for candidate in available:
@@ -158,7 +161,21 @@ def resolve_league(name: str) -> str:
 
 
 def fetch_base_types(league: str, force: bool = False) -> list[dict]:
-    """Raw base-type rows for a league, cached to disk with a TTL."""
+    """Raw base-type rows for a league, cached to disk with a TTL.
+
+    Resolves the league id **only on a cache miss**. The id is needed to build
+    the request, and on a hit there is no request - so resolving eagerly made a
+    "cached for a day" command spend one round trip every single time, which is
+    what the README promised it would not do.
+
+    Skipping the resolve on a hit skips its validation too, and that is sound
+    rather than merely cheap: the cache file exists because a previous call
+    already resolved the same name and got real data back. The cache key is
+    case-folded, so the two spellings that ``resolve_league`` exists to tell
+    apart - ``Allflame`` and ``allflame`` - share an entry, while a genuine typo
+    lands on a path that does not exist and falls through to the resolve and its
+    error message.
+    """
     ensure_dirs()
     path = _cache_path(f"basetypes-{league.lower().replace(' ', '-')}")
     if not force and path.exists() and (time.time() - path.stat().st_mtime) < TTL_SECONDS:
@@ -171,6 +188,7 @@ def fetch_base_types(league: str, force: bool = False) -> list[dict]:
         except json.JSONDecodeError:
             pass  # fall through and re-fetch
 
+    league = resolve_league(league)
     data = _get(
         f"{BASE}/poe1/api/economy/stash/current/item/overview",
         params={"league": league, "type": "BaseType"},

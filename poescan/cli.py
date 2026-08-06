@@ -843,8 +843,10 @@ def cmd_base_values(args) -> int:
     smaller - see poescan/ninja.py.
     """
     cfg = Config.load()
+    # Not resolved here: `fetch_base_types` does it on a cache miss, so a warm
+    # cache costs no requests at all rather than one for the league list.
+    league = args.league or cfg.league
     try:
-        league = ninja.resolve_league(args.league or cfg.league)
         if args.slots:
             for t in ninja.item_types(league):
                 console.print(f"  {t}")
