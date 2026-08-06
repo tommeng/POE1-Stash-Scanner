@@ -26,6 +26,7 @@ from .config import (
     ensure_dirs,
     poesessid_problem,
 )
+from . import ninja
 from .items import CATEGORY_LABELS, classify
 from .report import render
 from .ratelimit import RateLimiter
@@ -762,6 +763,73 @@ def cmd_analyse(args) -> int:
     return 0
 
 
+def cmd_base_values(args) -> int:
+    """What each base type is worth unrolled, from poe.ninja's aggregate.
+
+    One request covers every slot. `survey-bases` measures the same market
+    directly from GGG and agrees on ordering, but its samples are 10-100x
+    smaller - see poescan/ninja.py.
+    """
+    cfg = Config.load()
+    try:
+        league = ninja.resolve_league(args.league or cfg.league)
+        if args.slots:
+            for t in ninja.item_types(league):
+                console.print(f"  {t}")
+            return 0
+        rows = ninja.base_values(
+            league,
+            item_type=args.slot,
+            influence=args.influence,
+            ilvl_min=args.ilvl,
+            min_samples=args.min_samples,
+            force=args.refresh,
+        )
+    except ninja.NinjaError as e:
+        return _err(str(e))
+
+    if not rows:
+        console.print("[yellow]Nothing matched those filters.[/] "
+                      "Try --slots to list the slots available.")
+        return 0
+
+    scope = " / ".join(
+        p for p in (args.slot, args.influence, f"ilvl >= {args.ilvl}" if args.ilvl else None) if p
+    )
+    table = Table(
+        title=f"Unrolled base values - {league}{f' ({scope})' if scope else ''}",
+        header_style="bold",
+    )
+    table.add_column("base")
+    table.add_column("slot", style="dim")
+    table.add_column("influence", style="dim")
+    table.add_column("ilvl", justify="right")
+    table.add_column("listings", justify="right")
+    table.add_column("value", justify="right")
+
+    baseline = _median([r.chaos for r in rows if r.confident])
+    for r in rows[: args.top]:
+        value = f"{r.chaos:,.0f}c" if r.chaos < 1000 else f"{r.divine:,.1f}div"
+        table.add_row(
+            r.name,
+            r.item_type,
+            r.influence or "-",
+            str(r.ilvl),
+            f"{r.count}" if r.confident else f"[yellow]{r.count}[/]",
+            _price_cell(r.chaos, baseline) if r.confident else f"[dim]{value} (n={r.count})[/]",
+        )
+    console.print(table)
+
+    thin = len([r for r in rows if not r.confident])
+    console.print(
+        f"\n[dim]{len(rows)} rows matched, {thin} below the {MIN_CONFIDENT_SAMPLE}-listing "
+        "confidence floor and shown dimmed - a single listing sets its own price, and one\n"
+        "listed Helical Ring reported 30510c. Rows are per base, influence and item level.\n"
+        "Same underlying stash data as the trade API, better aggregated - not a second opinion.[/]"
+    )
+    return 0
+
+
 def cmd_survey_bases(args) -> int:
     """Measure what each base type in a slot floors at on the open market.
 
@@ -982,7 +1050,25 @@ def build_parser() -> argparse.ArgumentParser:
     )
     s.set_defaults(func=cmd_analyse)
 
-    s = sub.add_parser("survey-bases", help="measure what each base type floors at on the market")
+    s = sub.add_parser(
+        "base-values", help="what each base type is worth unrolled (poe.ninja aggregate)"
+    )
+    s.add_argument("--slot", help='item class, e.g. "Ring", "Body Armour"')
+    s.add_argument("--slots", action="store_true", help="list the slots available and exit")
+    s.add_argument("--influence", help='e.g. Shaper, "Shaper/Elder", or None for uninfluenced')
+    s.add_argument("--ilvl", type=int, help="only rows at or above this item level")
+    s.add_argument(
+        "--min-samples",
+        type=int,
+        default=MIN_CONFIDENT_SAMPLE,
+        help=f"hide rows backed by fewer listings (default: {MIN_CONFIDENT_SAMPLE})",
+    )
+    s.add_argument("--top", type=int, default=30, help="rows to show (default: 30)")
+    s.add_argument("--league", help="override the configured league")
+    s.add_argument("--refresh", action="store_true", help="ignore the 24h cache")
+    s.set_defaults(func=cmd_base_values)
+
+    s = sub.add_parser("survey-bases", help="spot-check a base against GGG's own trade API")
     s.add_argument("--category", help="category id to survey, e.g. accessory.ring")
     s.add_argument("--bases", help="explicit base types instead, comma separated")
     s.add_argument("--ilvl", type=int, help="only count listings at or above this item level")
