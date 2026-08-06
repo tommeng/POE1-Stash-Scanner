@@ -240,7 +240,7 @@ def test_a_rate_limit_wait_says_which_tab_it_is_holding_up(stubbed, cfg, index, 
     waits = [m for m in said if "rate limit" in m]
     assert waits, "a minute-long wait must not pass in silence"
     assert all("dump1" in m for m in waits), "a wait must name what it is holding up"
-    assert "1/1 used in 1m window" in waits[0], "and why it is waiting"
+    assert "1 requests counted in the last 1m, limit 2" in waits[0], "and why it is waiting"
     assert len(waits) > 1, "one message at the start is a frozen spinner, not progress"
 
 

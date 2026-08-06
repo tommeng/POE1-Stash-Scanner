@@ -3,7 +3,7 @@
 import json
 import time
 
-from poescan.ratelimit import Bucket, RateLimiter, Rule, _parse_rules, humanize
+from poescan.ratelimit import Bucket, RateLimiter, Rule, WaitStatus, _parse_rules, humanize
 
 
 class FakeHeaders(dict):
@@ -200,7 +200,7 @@ def test_a_wait_that_is_not_reported_still_waits():
 
 
 def test_wait_status_names_the_rule_that_bound():
-    """The binding rule is the whole point - '99/99 in 30m' is why it is slow."""
+    """The binding rule is the whole point - '29 in the last 1m' is why it is slow."""
     clock = FakeClock()
     lim = RateLimiter(clock=clock, sleeper=clock.sleep)
     b = lim.bucket("stash")
@@ -214,8 +214,37 @@ def test_wait_status_names_the_rule_that_bound():
 
     assert seen, "the 30-per-60s account rule should have bound"
     first = seen[0]
-    assert (first.used, first.budget, first.period) == (29, 29, 60.0)
-    assert first.describe() == "waiting 1m for rate limit (29/29 used in 1m window)"
+    assert (first.used, first.limit, first.period) == (29, 30, 60.0)
+    assert first.describe() == (
+        "waiting 1m for rate limit (29 requests counted in the last 1m, limit 30)"
+    )
+
+
+def test_a_shared_ip_can_report_more_requests_than_the_limit_allows():
+    """Counts are per-IP as well as per-account, so `used` can exceed `limit`.
+
+    A household, a VPN or a trade overlay all put hits on the clock this process
+    never made, and `_merge_policies` keeps the tightest rule beside the most
+    pessimistic count - which come from different rule sets here. Phrased as a
+    fraction of our own budget this read "40/29 used", i.e. as though we had
+    blown a limit: the one thing that earns a ban, and the one thing that had
+    not happened.
+    """
+    b = Bucket("stash", clock=lambda: 1000.0)
+    b.sync_from_headers(FakeHeaders({
+        "x-rate-limit-policy": "backend-item-request-limit",
+        "x-rate-limit-account": "30:60:60",
+        "x-rate-limit-account-state": "5:60:0",
+        "x-rate-limit-ip": "45:60:120",
+        "x-rate-limit-ip-state": "40:60:0",
+    }))
+    _, rule, used = b.binding()
+    assert (used, rule.hits) == (40, 30), "the ip count against the account rule"
+
+    said = WaitStatus(remaining=60.0, waited=0.0, used=used,
+                      limit=rule.hits, period=rule.period).describe()
+    assert "40 requests counted in the last 1m, limit 30" in said
+    assert "/" not in said, "a fraction that reads as 40-of-29 is a false alarm"
 
 
 def test_a_ban_reports_itself_as_a_ban():
@@ -249,6 +278,10 @@ def test_humanize():
     assert humanize(60) == "1m"
     assert humanize(330) == "5m30s"
     assert humanize(1800) == "30m"
+    # The trade ip policy really does publish a 21600s rule; "360m" would be a
+    # division the reader has to do in the message meant to save them one.
+    assert humanize(21600) == "6h"
+    assert humanize(3600 + 330) == "1h5m30s"
 
 
 def test_budget_remaining_reports_tightest_rule():

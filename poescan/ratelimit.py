@@ -163,12 +163,20 @@ class Bucket:
 
 
 def humanize(seconds: float) -> str:
-    """``330`` -> ``5m30s``. Whole minutes drop the seconds; under a minute is bare."""
+    """``330`` -> ``5m30s``. Larger units drop an empty remainder; seconds are bare.
+
+    Hours are not decoration: the trade ip policy includes a 21600-second rule,
+    and "360m" in a message whose whole job is to be legible at a glance is a
+    division the reader should not have to do.
+    """
     total = int(seconds + 0.5)
     if total < 60:
         return f"{total}s"
-    minutes, rest = divmod(total, 60)
-    return f"{minutes}m{rest}s" if rest else f"{minutes}m"
+    if total < 3600:
+        minutes, rest = divmod(total, 60)
+        return f"{minutes}m{rest}s" if rest else f"{minutes}m"
+    hours, rest = divmod(total, 3600)
+    return f"{hours}h{humanize(rest)}" if rest else f"{hours}h"
 
 
 @dataclass(frozen=True)
@@ -177,22 +185,35 @@ class WaitStatus:
 
     A scan that correctly waits out a 30-minute stash window is indistinguishable
     from one that has hung, unless it says so. This carries enough to explain
-    itself: which limit bound, how much of it is spent, and how long is left.
+    itself: how long is left, and which rule is responsible.
+
+    ``used`` is counted against ``limit``, GGG's own advertised allowance, and
+    **it can legitimately exceed it**. Limits are per-account and per-IP, so a
+    shared IP, a VPN, or a trade overlay running alongside a scan all put hits
+    on the clock that this process never made; ``_merge_policies`` keeps the
+    tightest rule next to the most pessimistic count, and those can come from
+    different rule sets. Phrasing it as a fraction of our own headroom-reduced
+    budget rendered that as "40/29 used", which reads as us having blown through
+    a limit - the one thing that earns a ban, and the one thing that had not
+    happened. "counted in the last" says whose count it is without claiming it
+    is all ours.
     """
 
-    policy: str
     remaining: float
     waited: float
     used: int = 0
-    budget: int = 0
+    limit: int = 0
     period: float = 0.0
 
     def describe(self) -> str:
         head = f"waiting {humanize(self.remaining)} for rate limit"
         if not self.period:
-            # No local count explains a ban; saying "0/0 used" would invent one.
+            # No local count explains a ban; quoting one would invent it.
             return f"{head} (banned by the server)"
-        return f"{head} ({self.used}/{self.budget} used in {humanize(self.period)} window)"
+        return (
+            f"{head} ({self.used} requests counted in the last "
+            f"{humanize(self.period)}, limit {self.limit})"
+        )
 
 
 def _pick(headers, *names: str) -> str | None:
@@ -251,16 +272,14 @@ class RateLimiter:
     has no idea the first just spent the budget.
     """
 
-    def __init__(
-        self, clock=time.monotonic, sleeper=time.sleep, state_path=None, on_wait=None
-    ) -> None:
+    def __init__(self, clock=time.monotonic, sleeper=time.sleep, state_path=None) -> None:
         self._buckets: dict[str, Bucket] = {}
         self._lock = threading.Lock()
         self._clock = clock
         self._sleeper = sleeper
-        # Settable after construction: the scanner only knows what to say about
-        # a wait once it knows which tab it is reading.
-        self.on_wait = on_wait
+        # Set after construction, not here: the scanner only knows what to say
+        # about a wait once it knows which tab it is reading. See `wait`.
+        self.on_wait = None
         self._state_path = Path(state_path) if state_path else None
         self._last_saved = 0.0
         if self._state_path:
@@ -348,18 +367,18 @@ class RateLimiter:
                 self._buckets[policy] = Bucket(name=policy, clock=self._clock)
             return self._buckets[policy]
 
-    def wait(self, policy: str, sleeper=None, on_wait=None) -> float:
+    def wait(self, policy: str, sleeper=None) -> float:
         """Block until a request under ``policy`` is safe. Returns seconds waited.
 
-        ``on_wait`` is called with a ``WaitStatus`` before each nap, so a caller
-        can keep a spinner honest about a wait that may run to several minutes.
-        It defaults to the limiter-wide ``self.on_wait``, which is the seam the
-        scanner uses: the limiter is already the one object shared by the stash
-        and trade clients, so setting it there reaches every call site without
-        threading a callback through two clients that have no other use for one.
+        ``self.on_wait``, when set, is called with a ``WaitStatus`` before each
+        nap, so a caller can keep a spinner honest about a wait that may run to
+        half an hour. It is an attribute rather than an argument threaded through
+        here because the limiter is already the one object shared by the stash
+        and trade clients, and neither of them has any other use for a progress
+        callback. It is expected to be scoped to one operation - ``scan()``
+        builds its own limiter - since nothing clears it.
         """
         sleep = sleeper or self._sleeper
-        report = on_wait or self.on_wait
         b = self.bucket(policy)
         total = 0.0
         while True:
@@ -370,14 +389,16 @@ class RateLimiter:
             # Cap each nap so a long wait keeps reporting progress rather than
             # going silent for its whole duration.
             chunk = min(d, 5.0)
-            if report:
-                report(
+            if self.on_wait:
+                self.on_wait(
                     WaitStatus(
-                        policy=policy,
                         remaining=d,
                         waited=total,
                         used=used,
-                        budget=max(1, rule.hits - b.headroom) if rule else 0,
+                        # GGG's advertised allowance, not our headroom-reduced
+                        # budget: the headroom is our caution and reporting it
+                        # as the limit would misattribute it to them.
+                        limit=rule.hits if rule else 0,
                         period=rule.period if rule else 0.0,
                     )
                 )

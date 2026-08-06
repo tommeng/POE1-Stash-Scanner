@@ -194,13 +194,15 @@ def scan(
         if progress:
             progress(msg)
 
-    def waiting(status) -> None:
-        if not progress:
-            return
+    # `w`, not `status` - that name is taken by this function's trade listing
+    # status, and shadowing it here would put `securable` and a WaitStatus
+    # behind the same identifier in one function.
+    def waiting(w) -> None:
         head = activity.rstrip(". ")
-        progress(f"{head} - {status.describe()}" if head else status.describe())
+        progress(f"{head} - {w.describe()}" if head else w.describe())
 
-    limiter.on_wait = waiting
+    if progress:
+        limiter.on_wait = waiting
 
     with open_stash(cfg, token, limiter) as stash:
         say("Listing stash tabs...")

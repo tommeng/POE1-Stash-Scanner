@@ -165,8 +165,13 @@ def cmd_tabs(args) -> int:
     except AuthError as e:
         return _err(str(e))
 
+    # Printed nothing at all while it waited, which is the worst version of the
+    # problem: this is the command people run straight after a scan, i.e. exactly
+    # when the stash window is spent and the wait is longest.
+    limiter = RateLimiter(state_path=RATELIMIT_STATE)
     try:
-        with open_stash(cfg, token, RateLimiter(state_path=RATELIMIT_STATE)) as stash:
+        with console.status("[bold]Listing tabs...") as status, open_stash(cfg, token, limiter) as stash:
+            limiter.on_wait = lambda w: status.update(f"[bold]Listing tabs - {w.describe()}")
             tabs = stash.flat_tabs()
     except StashError as e:
         return _err(str(e))
@@ -960,6 +965,16 @@ def cmd_survey_bases(args) -> int:
         if not console.input("\nProceed? [y/N] ").strip().lower().startswith("y"):
             console.print("Nothing spent.")
             return 0
+
+    # The longest-waiting command in the repo - 39 bases against a 30-per-300s
+    # search limit parks for minutes at a time, behind a frozen "(3/39) Opal
+    # Ring...". This output is line-oriented rather than a spinner, so report
+    # once per wait rather than every five seconds; `waited == 0` is the first
+    # report of a given wait. Abandoning a survey that looks hung throws away
+    # searches already spent, and searches are the scarcest thing here.
+    limiter.on_wait = lambda w: (
+        console.print(f"[dim]  {w.describe()}[/]") if w.waited == 0 else None
+    )
 
     rows: list[dict] = []
     with TradeClient(league, limiter, status=args.status) as trade:
