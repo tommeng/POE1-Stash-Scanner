@@ -366,8 +366,11 @@ def cmd_diagnose(args) -> int:
         return _err(f"Could not load trade stat definitions: {e}")
     tabs_wanted = [t.strip() for t in args.tabs.split(",")] if args.tabs else list(cfg.tabs or [])
 
+    limiter = RateLimiter(state_path=RATELIMIT_STATE)
     try:
-        with console.status("[bold]Reading stash..."), open_stash(cfg, token, RateLimiter(state_path=RATELIMIT_STATE)) as stash:
+        with console.status("[bold]Reading stash...") as status, open_stash(cfg, token, limiter) as stash:
+            # Reading several tabs can park on the stash window for minutes.
+            limiter.on_wait = lambda w: status.update(f"[bold]Reading stash - {w.describe()}")
             chosen = select_tabs(stash.flat_tabs(), tabs_wanted)
             if not chosen:
                 return _err(f"No tabs matched {tabs_wanted!r}. Run `poescan tabs` to list them.")

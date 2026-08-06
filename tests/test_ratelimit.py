@@ -3,7 +3,7 @@
 import json
 import time
 
-from poescan.ratelimit import Bucket, RateLimiter, Rule, _parse_rules
+from poescan.ratelimit import Bucket, RateLimiter, Rule, _parse_rules, humanize
 
 
 class FakeHeaders(dict):
@@ -166,6 +166,89 @@ def test_wait_respects_a_ban():
     b.note_retry_after(12.0)
     waited = lim.wait("p")
     assert abs(waited - 12.0) < 0.01
+
+
+# -- reporting a wait -------------------------------------------------------
+#
+# A long wait is correct behaviour that looks exactly like a hang. These pin
+# that it explains itself while it happens, not afterwards.
+
+
+def test_wait_reports_progress_before_each_nap():
+    clock = FakeClock()
+    lim = RateLimiter(clock=clock, sleeper=clock.sleep)
+    lim.bucket("p").rules = _parse_rules("2:60:60")  # budget = 1
+
+    seen = []
+    lim.on_wait = seen.append
+    lim.wait("p")  # free
+    lim.wait("p")  # blocks for the full 60s window
+
+    assert len(seen) == 12, "a 60s wait in 5s naps should report 12 times, not once"
+    assert seen[0].remaining > seen[-1].remaining, "countdown must actually count down"
+    assert seen[0].waited == 0.0
+    assert abs(seen[-1].waited - 55.0) < 0.01
+
+
+def test_a_wait_that_is_not_reported_still_waits():
+    """The callback is decoration. Without one, throttling is unchanged."""
+    clock = FakeClock()
+    lim = RateLimiter(clock=clock, sleeper=clock.sleep)
+    lim.bucket("p").rules = _parse_rules("2:10:60")
+    lim.wait("p")
+    assert abs(lim.wait("p") - 10.0) < 0.01
+
+
+def test_wait_status_names_the_rule_that_bound():
+    """The binding rule is the whole point - '99/99 in 30m' is why it is slow."""
+    clock = FakeClock()
+    lim = RateLimiter(clock=clock, sleeper=clock.sleep)
+    b = lim.bucket("stash")
+    b.sync_from_headers(stash_headers())
+
+    seen = []
+    lim.on_wait = seen.append
+    for _ in range(29 - 1):
+        lim.wait("stash")
+    lim.wait("stash")
+
+    assert seen, "the 30-per-60s account rule should have bound"
+    first = seen[0]
+    assert (first.used, first.budget, first.period) == (29, 29, 60.0)
+    assert first.describe() == "waiting 1m for rate limit (29/29 used in 1m window)"
+
+
+def test_a_ban_reports_itself_as_a_ban():
+    """A ban has no local count behind it; inventing one would misreport."""
+    clock = FakeClock()
+    lim = RateLimiter(clock=clock, sleeper=clock.sleep)
+    b = lim.bucket("p")
+    b.rules = _parse_rules("5:10:60")
+    b.note_retry_after(90.0)
+
+    seen = []
+    lim.on_wait = seen.append
+    lim.wait("p")
+
+    assert seen[0].period == 0.0
+    assert seen[0].describe() == "waiting 1m30s for rate limit (banned by the server)"
+
+
+def test_binding_reports_the_rule_forcing_the_longest_wait():
+    """Two rules over budget: the report must name the one that actually binds."""
+    b = Bucket("p", clock=lambda: 1000.0, rules=[Rule(3, 10, 0), Rule(5, 600, 0)])
+    b.timestamps = [995.0, 996.0, 997.0, 998.0]  # over budget on both
+    wait, rule, used = b.binding()
+    assert rule.period == 600.0, "the 600s window frees last, so it is what binds"
+    assert used == 4
+    assert abs(wait - 595.0) < 0.01
+
+
+def test_humanize():
+    assert humanize(45) == "45s"
+    assert humanize(60) == "1m"
+    assert humanize(330) == "5m30s"
+    assert humanize(1800) == "30m"
 
 
 def test_budget_remaining_reports_tightest_rule():

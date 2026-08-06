@@ -224,6 +224,17 @@ stalls the client for a full 300s. Backfilled hits are therefore placed just out
 `RateLimiter` takes injectable `clock` and `sleeper` so time-dependent behaviour is tested without
 real sleeps.
 
+**A silent wait is indistinguishable from a hang**, and waiting out the 100-per-1800s stash window
+legitimately takes minutes. `wait()` therefore reports a `WaitStatus` before each 5-second nap —
+which limit bound, how much of it is spent, how long is left — via `RateLimiter.on_wait`. That
+callback lives on the limiter rather than being threaded through `wait()`'s callers because the
+limiter is already the one object shared by the stash and trade clients, neither of which has any
+other use for a progress callback. `scanner.scan()` sets it to compose with the last thing `say()`
+announced, so the wait names what it is holding up:
+`Reading tab '26' (#44) - waiting 28m22s for rate limit (99/99 used in 30m window)`.
+`Bucket.binding()` returns the rule responsible, not just the delay; a wait caused by a server ban
+reports itself as one, because no local count explains it.
+
 ### Auth: two paths (`auth.py`, `stash.py`, `Config.auth_mode`)
 
 - **OAuth** — public client, PKCE, loopback redirect. Preferred, but GGG's developer docs currently

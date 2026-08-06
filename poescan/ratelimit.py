@@ -71,12 +71,20 @@ class Bucket:
         cutoff = now - horizon
         self.timestamps = [t for t in self.timestamps if t > cutoff]
 
-    def delay_until_free(self, now: float | None = None) -> float:
-        """Seconds to wait before the next request is safe. 0 means go now."""
+    def binding(self, now: float | None = None) -> "tuple[float, Rule | None, int]":
+        """``(seconds to wait, the rule that forces it, hits counted against it)``.
+
+        The rule is what makes a wait explicable rather than a hang: "99 of 99
+        used in a 30 minute window" is correct behaviour, and looks it. It is
+        ``None`` when the wait comes from a ban rather than from a rule, since
+        a ban is imposed by GGG and no local count explains it.
+        """
         now = self.clock() if now is None else now
         with self._lock:
             self._prune(now)
             wait = max(0.0, self.blocked_until - now)
+            worst: Rule | None = None
+            used = 0
             for rule in self.rules:
                 budget = max(1, rule.hits - self.headroom)
                 in_window = sorted(t for t in self.timestamps if t > now - rule.period)
@@ -84,8 +92,13 @@ class Bucket:
                     # Enough hits must age out to bring us back under budget;
                     # that happens when in_window[n - budget] leaves the window.
                     expires = in_window[len(in_window) - budget] + rule.period
-                    wait = max(wait, expires - now)
-            return wait
+                    if expires - now > wait:
+                        wait, worst, used = expires - now, rule, len(in_window)
+            return wait, worst, used
+
+    def delay_until_free(self, now: float | None = None) -> float:
+        """Seconds to wait before the next request is safe. 0 means go now."""
+        return self.binding(now)[0]
 
     def record(self, now: float | None = None) -> None:
         now = self.clock() if now is None else now
@@ -149,6 +162,39 @@ class Bucket:
             return worst
 
 
+def humanize(seconds: float) -> str:
+    """``330`` -> ``5m30s``. Whole minutes drop the seconds; under a minute is bare."""
+    total = int(seconds + 0.5)
+    if total < 60:
+        return f"{total}s"
+    minutes, rest = divmod(total, 60)
+    return f"{minutes}m{rest}s" if rest else f"{minutes}m"
+
+
+@dataclass(frozen=True)
+class WaitStatus:
+    """Why a request is being held back, reported while it is being held back.
+
+    A scan that correctly waits out a 30-minute stash window is indistinguishable
+    from one that has hung, unless it says so. This carries enough to explain
+    itself: which limit bound, how much of it is spent, and how long is left.
+    """
+
+    policy: str
+    remaining: float
+    waited: float
+    used: int = 0
+    budget: int = 0
+    period: float = 0.0
+
+    def describe(self) -> str:
+        head = f"waiting {humanize(self.remaining)} for rate limit"
+        if not self.period:
+            # No local count explains a ban; saying "0/0 used" would invent one.
+            return f"{head} (banned by the server)"
+        return f"{head} ({self.used}/{self.budget} used in {humanize(self.period)} window)"
+
+
 def _pick(headers, *names: str) -> str | None:
     for n in names:
         v = headers.get(n)
@@ -205,11 +251,16 @@ class RateLimiter:
     has no idea the first just spent the budget.
     """
 
-    def __init__(self, clock=time.monotonic, sleeper=time.sleep, state_path=None) -> None:
+    def __init__(
+        self, clock=time.monotonic, sleeper=time.sleep, state_path=None, on_wait=None
+    ) -> None:
         self._buckets: dict[str, Bucket] = {}
         self._lock = threading.Lock()
         self._clock = clock
         self._sleeper = sleeper
+        # Settable after construction: the scanner only knows what to say about
+        # a wait once it knows which tab it is reading.
+        self.on_wait = on_wait
         self._state_path = Path(state_path) if state_path else None
         self._last_saved = 0.0
         if self._state_path:
@@ -297,18 +348,39 @@ class RateLimiter:
                 self._buckets[policy] = Bucket(name=policy, clock=self._clock)
             return self._buckets[policy]
 
-    def wait(self, policy: str, sleeper=None) -> float:
-        """Block until a request under ``policy`` is safe. Returns seconds waited."""
+    def wait(self, policy: str, sleeper=None, on_wait=None) -> float:
+        """Block until a request under ``policy`` is safe. Returns seconds waited.
+
+        ``on_wait`` is called with a ``WaitStatus`` before each nap, so a caller
+        can keep a spinner honest about a wait that may run to several minutes.
+        It defaults to the limiter-wide ``self.on_wait``, which is the seam the
+        scanner uses: the limiter is already the one object shared by the stash
+        and trade clients, so setting it there reaches every call site without
+        threading a callback through two clients that have no other use for one.
+        """
         sleep = sleeper or self._sleeper
+        report = on_wait or self.on_wait
         b = self.bucket(policy)
         total = 0.0
         while True:
-            d = b.delay_until_free()
+            d, rule, used = b.binding()
             if d <= 0:
                 b.record()
                 return total
-            # Cap each nap so a long ban still surfaces progress to the caller.
+            # Cap each nap so a long wait keeps reporting progress rather than
+            # going silent for its whole duration.
             chunk = min(d, 5.0)
+            if report:
+                report(
+                    WaitStatus(
+                        policy=policy,
+                        remaining=d,
+                        waited=total,
+                        used=used,
+                        budget=max(1, rule.hits - b.headroom) if rule else 0,
+                        period=rule.period if rule else 0.0,
+                    )
+                )
             sleep(chunk)
             total += chunk
 

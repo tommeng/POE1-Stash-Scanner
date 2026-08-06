@@ -183,9 +183,24 @@ def scan(
     report = ScanReport(league=cfg.league)
     tabs_wanted = tabs_wanted if tabs_wanted is not None else list(cfg.tabs or [])
 
+    # The last thing announced, so a rate-limit wait can say what it is holding
+    # up. Waiting out the 100-per-1800s stash window is correct and can take
+    # minutes; without this it is a still spinner and reads as a hang.
+    activity = ""
+
     def say(msg: str) -> None:
+        nonlocal activity
+        activity = msg
         if progress:
             progress(msg)
+
+    def waiting(status) -> None:
+        if not progress:
+            return
+        head = activity.rstrip(". ")
+        progress(f"{head} - {status.describe()}" if head else status.describe())
+
+    limiter.on_wait = waiting
 
     with open_stash(cfg, token, limiter) as stash:
         say("Listing stash tabs...")
