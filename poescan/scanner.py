@@ -88,6 +88,7 @@ class ScanReport:
     candidates: list[Candidate] = field(default_factory=list)
     market_checks: int = 0
     cache_hits: int = 0
+    dismissed_items: int = 0
     notes: list[str] = field(default_factory=list)
     scanned_label: str = ""
 
@@ -242,15 +243,32 @@ def scan(
     try:
         if verify and candidates:
             with Cache() as cache, TradeClient(cfg.league, limiter, status=status) as trade:
-                dismissed = cache.dismissed_ids()
-                candidates = [c for c in candidates if c.item.id not in dismissed]
-
                 say("Fetching currency rates...")
                 trade.load_rates()
+
+                # Dismissed items stay in this loop rather than being filtered
+                # out ahead of it, and the order inside it is the whole point:
+                # re-labelling is a cache read and costs nothing, while the
+                # market check costs budget. Those rows are the negative half
+                # of the calibration dataset - the evidence for what triage
+                # should have discarded - so dropping them early would strand
+                # them describing whatever ruleset was current the last time
+                # the item was priced. They leave the report after the loop.
+                dismissed = cache.dismissed_ids(cfg.league)
+                report.dismissed_items = sum(1 for c in candidates if c.item.id in dismissed)
+                checkable = len(candidates) - report.dismissed_items
 
                 checked = 0
                 for c in candidates:
                     cached = cache.get_check(c.item.id, cfg.league, cache_hours)
+                    if cached:
+                        # Costs no API call, and salvages checks stored before
+                        # feature logging existed - or under an older ruleset,
+                        # since the verdict in hand was scored by the current
+                        # one against the same unchanged item.
+                        cache.label_features(c.item.id, cfg.league, _features(c.verdict, ruleset))
+                    if c.item.id in dismissed:
+                        continue
                     if cached:
                         c.market = MarketResult(
                             total=cached.total,
@@ -268,20 +286,16 @@ def scan(
                         c.market.listings = _listings_from_payload(cached.payload)
                         c.from_cache = True
                         report.cache_hits += 1
-                        # Costs no API call, and salvages checks stored before
-                        # feature logging existed - or under an older ruleset,
-                        # since the verdict in hand was scored by the current
-                        # one against the same unchanged item.
-                        cache.label_features(c.item.id, cfg.league, _features(c.verdict, ruleset))
                         continue
                     if checked >= cap:
                         report.notes.append(
                             f"Stopped market checks at the {cap}-item cap; "
-                            f"{len(candidates) - checked} candidates scored by rules only."
+                            f"{checkable - checked - report.cache_hits} candidates "
+                            "scored by rules only."
                         )
                         break
                     left = trade.budget()
-                    say(f"Checking market for {c.item.label} ({checked + 1}/{min(cap, len(candidates))})"
+                    say(f"Checking market for {c.item.label} ({checked + 1}/{min(cap, checkable)})"
                         + (f" - {left[0]} searches left in window" if left else ""))
                     c.market = trade.price_check(c.item, c.verdict)
                     # Never cache a failure. `error` is not persisted, so a stored
@@ -295,6 +309,7 @@ def scan(
                         )
                     checked += 1
                 report.market_checks = checked
+                candidates = [c for c in candidates if c.item.id not in dismissed]
     finally:
         limiter.save(force=True)
 

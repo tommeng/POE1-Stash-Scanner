@@ -208,12 +208,35 @@ Market checks are cached in SQLite for 72 hours keyed on item id, so rescanning 
 already looked at costs almost nothing. Failed checks are deliberately *not* cached, so a dropped
 connection doesn't poison the results until the cache expires.
 
+### Dismissing junk
+
+Most of a mature cache is items you have already looked at and rejected, and every one of them is
+re-priced when its 72-hour entry expires. That is where the bulk of the API budget goes, and it is
+why a full scan takes half an hour. Tell it once:
+
+```bash
+uv run poescan dismiss <item-id> --note "flooded at 1c"   # never show me this again
+uv run poescan dismiss --list                             # what am I currently hiding?
+uv run poescan dismiss --undo <item-id>                   # changed my mind
+```
+
+Every card in the HTML report prints the command to copy, and `--json` includes an `id` per
+candidate. Dismissed items are kept out of the report and cost no market checks, but the price
+observation they already produced stays in the cache — it is the negative half of the data
+`analyse` reads.
+
+Dismissals never expire. It is your judgement about the item rather than a price, and re-showing it
+in three days is the thing the command exists to stop. It applies to one league, because item ids
+follow items into Standard when a league ends and the economy there is not the one you judged.
+Nothing is ever dismissed automatically: a false negative costs you real money, and a junk signal
+is not worth that risk.
+
 ### Other commands
 
 ```bash
 uv run poescan analyse       # what your accumulated market checks say about the ruleset
 uv run poescan budget        # remaining API allowance, from saved state
-uv run poescan cache         # how much is cached
+uv run poescan cache         # how much is cached (--league to scope it)
 uv run poescan refresh-data  # re-download trade metadata after a league or patch
 uv run poescan base-values --slot Ring --influence Shaper --ilvl 84
 uv run poescan survey-bases --category accessory.ring --ilvl 84 --influence shaper

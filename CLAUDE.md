@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 uv sync                                   # install
-uv run pytest                             # 294 tests, ~3.9s (fully offline)
+uv run pytest                             # 353 tests, ~4.3s (fully offline)
 uv run pytest tests/test_ratelimit.py     # one file
 uv run pytest -k test_reduced_resolves    # one test by name
 uv run poescan validate-rules             # every mod string and base name in the ruleset really exists
@@ -82,6 +82,29 @@ not argument.
   put `+54 Accuracy Rating` above real mods and "priced" a 2c amulet at 570c against three
   coincidental matches. Accuracy, light radius, mana regen, hybrid attributes etc. are excluded
   when narrowing.
+
+### Dismissals (`poescan dismiss`)
+
+A quarter of a mature cache is confirmed junk being re-priced every time the 72h TTL expires, and
+that budget is why a full scan takes ~30 minutes. A dismissal is the user saying so once. Three
+decisions are load-bearing:
+
+- **No expiry.** It is a human judgement, not a price observation, so re-showing the item in three
+  days defeats the entire purpose. Economies shift at league boundaries, which the per-league
+  scoping handles, and `--undo` covers the rest.
+- **Per league**, because an item id survives a league ending — items migrate to Standard with the
+  same id into a different economy. Rows written before the column existed carry `ANY_LEAGUE` and
+  apply everywhere, since their league was never recorded and inventing one would silently narrow
+  a judgement the user made when dismissals were global.
+- **`scan()` re-labels before it filters.** Dismissed items stay in the market-check loop long
+  enough for `label_features` to run — a cache read, no API call — and are dropped from the report
+  afterwards. Those rows are the *negative* half of the calibration dataset, and `analyse` sets
+  aside anything labelled by another ruleset, so filtering them out ahead of the loop (which is how
+  it was first written) strands them permanently unlabelled, silently and for free.
+  `test_a_dismissed_item_still_gets_its_cached_check_re_labelled` pins this.
+
+Never dismiss automatically on a junk signal, however strong. That trades budget for false
+negatives, which is the failure mode that costs the user money.
 
 ### Calibration: measuring instead of guessing
 

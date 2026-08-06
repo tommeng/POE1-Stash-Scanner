@@ -45,6 +45,16 @@ Note this is one row per item (upsert on ``item_id``), so a re-check replaces
 the earlier observation rather than appending to it. That is the right
 behaviour for a cache and adequate for calibration - each item is its own data
 point - but it means no per-item price history.
+
+The ``dismissed`` table is the other half of the file and is not a cache at
+all. A dismissal is a human judgement - "I looked at this and it was not worth
+it" - so unlike a price observation it has no TTL. Expiring one would re-show
+the item every 72 hours, which is the entire thing the table exists to stop,
+and would spend an API call re-confirming a verdict the user already reached.
+It is scoped per league instead, because an item id survives a league ending:
+items migrate to Standard carrying the same id into a different economy, and a
+judgement made in Allflame should not silently follow them there. ``undismiss``
+is the escape hatch for the rest.
 """
 
 from __future__ import annotations
@@ -69,12 +79,41 @@ CREATE TABLE IF NOT EXISTS market_check (
 );
 CREATE INDEX IF NOT EXISTS market_check_league ON market_check(league, checked_at);
 
+"""
+
+DISMISSED_DDL = """
 CREATE TABLE IF NOT EXISTS dismissed (
-    item_id     TEXT PRIMARY KEY,
+    item_id      TEXT NOT NULL,
+    league       TEXT NOT NULL,
     dismissed_at REAL NOT NULL,
-    note        TEXT
+    note         TEXT,
+    PRIMARY KEY (item_id, league)
 );
 """
+
+# Rows written before `dismissed` was league-scoped. Their league was never
+# recorded, so there is nothing to migrate it to - they are honoured in every
+# league rather than guessed into one, which is the behaviour they were written
+# under. Nothing could have created them but a library caller: the command that
+# writes dismissals is newer than the column.
+ANY_LEAGUE = ""
+
+# A dismissal counts in the league it was made in, plus the league-less rows
+# above. Every read of the table uses this, so what `poescan dismiss --list`
+# shows is exactly what a scan suppresses.
+_IN_EFFECT = "league IN (?, ?)"
+
+
+@dataclass
+class Dismissal:
+    item_id: str
+    league: str
+    dismissed_at: float
+    note: str
+
+    @property
+    def every_league(self) -> bool:
+        return self.league == ANY_LEAGUE
 
 
 @dataclass
@@ -95,7 +134,29 @@ class Cache:
         ensure_dirs()
         self.conn = sqlite3.connect(str(path or CACHE_DB))
         self.conn.row_factory = sqlite3.Row
-        self.conn.executescript(SCHEMA)
+        self._migrate_dismissed()
+        self.conn.executescript(SCHEMA + DISMISSED_DDL)
+        self.conn.commit()
+
+    def _migrate_dismissed(self) -> None:
+        """Add `league` to a `dismissed` table created before it had one.
+
+        SQLite cannot alter a primary key, so the table is rebuilt around the
+        new one. Existing rows keep ``ANY_LEAGUE``: their league was never
+        recorded, and inventing one would silently narrow a judgement the user
+        made when dismissals were global.
+        """
+        cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(dismissed)")}
+        if not cols or "league" in cols:
+            return  # not created yet, or already migrated
+        self.conn.execute("ALTER TABLE dismissed RENAME TO dismissed_old")
+        self.conn.executescript(DISMISSED_DDL)
+        self.conn.execute(
+            "INSERT OR IGNORE INTO dismissed (item_id, league, dismissed_at, note) "
+            "SELECT item_id, ?, dismissed_at, note FROM dismissed_old",
+            (ANY_LEAGUE,),
+        )
+        self.conn.execute("DROP TABLE dismissed_old")
         self.conn.commit()
 
     def close(self) -> None:
@@ -245,17 +306,72 @@ class Cache:
             )
         return out
 
-    def dismiss(self, item_id: str, note: str = "") -> None:
+    def has_check(self, item_id: str, league: str) -> bool:
+        """Is there any stored check for this id, however old?
+
+        Only worth asking before dismissing one: an id that has never been
+        seen is almost always a typo, and a typo'd dismissal is a row that
+        matches nothing, forever, without ever announcing itself.
+        """
+        row = self.conn.execute(
+            "SELECT 1 FROM market_check WHERE item_id = ? AND league = ?", (item_id, league)
+        ).fetchone()
+        return row is not None
+
+    def dismiss(self, item_id: str, league: str, note: str = "") -> None:
         self.conn.execute(
-            "INSERT OR REPLACE INTO dismissed (item_id, dismissed_at, note) VALUES (?,?,?)",
-            (item_id, time.time(), note),
+            "INSERT OR REPLACE INTO dismissed (item_id, league, dismissed_at, note) "
+            "VALUES (?,?,?,?)",
+            (item_id, league, time.time(), note),
         )
         self.conn.commit()
 
-    def dismissed_ids(self) -> set[str]:
-        return {r["item_id"] for r in self.conn.execute("SELECT item_id FROM dismissed")}
+    def undismiss(self, item_id: str, league: str) -> bool:
+        """Reverse a dismissal. True if there was one to reverse.
 
-    def stats(self) -> dict:
-        checks = self.conn.execute("SELECT COUNT(*) c FROM market_check").fetchone()["c"]
-        dismissed = self.conn.execute("SELECT COUNT(*) c FROM dismissed").fetchone()["c"]
-        return {"market_checks": checks, "dismissed": dismissed}
+        Reaches ``ANY_LEAGUE`` rows too, because they suppress the item in the
+        league being undone from and there is otherwise no way to name them:
+        refusing here would leave the item hidden with nothing to point at.
+        """
+        cur = self.conn.execute(
+            f"DELETE FROM dismissed WHERE item_id = ? AND {_IN_EFFECT}",
+            (item_id, league, ANY_LEAGUE),
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def dismissed_ids(self, league: str) -> set[str]:
+        return {
+            r["item_id"]
+            for r in self.conn.execute(
+                f"SELECT item_id FROM dismissed WHERE {_IN_EFFECT}", (league, ANY_LEAGUE)
+            )
+        }
+
+    def dismissals(self, league: str | None = None) -> list[Dismissal]:
+        """Current dismissals, newest first. A league scopes to what it hides."""
+        sql = "SELECT * FROM dismissed"
+        args: tuple = ()
+        if league is not None:
+            sql += f" WHERE {_IN_EFFECT}"
+            args = (league, ANY_LEAGUE)
+        sql += " ORDER BY dismissed_at DESC"
+        return [
+            Dismissal(
+                item_id=r["item_id"],
+                league=r["league"],
+                dismissed_at=r["dismissed_at"],
+                note=r["note"] or "",
+            )
+            for r in self.conn.execute(sql, args)
+        ]
+
+    def stats(self, league: str | None = None) -> dict:
+        """How much is stored, optionally scoped to one league."""
+        sql = "SELECT COUNT(*) c FROM market_check"
+        args: tuple = ()
+        if league is not None:
+            sql += " WHERE league = ?"
+            args = (league,)
+        checks = self.conn.execute(sql, args).fetchone()["c"]
+        return {"market_checks": checks, "dismissed": len(self.dismissals(league))}
