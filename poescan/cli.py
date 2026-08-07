@@ -262,6 +262,9 @@ def cmd_scan(args) -> int:
             "rare_items": report.rare_items,
             "candidates": [
                 {
+                    # The handle for `poescan dismiss`. Without it there was no
+                    # way to name an item from outside the scan at all.
+                    "id": c.item.id,
                     "name": c.item.label,
                     "category": c.item.category_label,
                     "ilvl": c.item.ilvl,
@@ -303,7 +306,8 @@ def _print_summary(report) -> None:
         f"[dim]/[/] [bold]{report.rare_items}[/] rare "
         f"[dim]/[/] [bold yellow]{len(report.candidates)}[/] flagged "
         f"[dim]({report.market_checks} market checks, {report.cache_hits} cached, "
-        f"{report.duration:.0f}s)[/]"
+        + (f"{report.dismissed_items} dismissed, " if report.dismissed_items else "")
+        + f"{report.duration:.0f}s)[/]"
     )
     for n in report.notes:
         console.print(f"[yellow]![/] {n}")
@@ -642,12 +646,113 @@ def cmd_budget(args) -> int:
 def cmd_cache(args) -> int:
     with Cache() as cache:
         if args.clear:
-            cache.conn.execute("DELETE FROM market_check")
+            # Scoped the same way the summary is, so `--league X --clear`
+            # cannot quietly empty every other league's observations as well.
+            # Dismissals survive either way: they are the user's judgement
+            # rather than cached data, and re-earning one costs an API call.
+            if args.league:
+                cache.conn.execute("DELETE FROM market_check WHERE league = ?", (args.league,))
+            else:
+                cache.conn.execute("DELETE FROM market_check")
             cache.conn.commit()
             console.print("[green]Market check cache cleared.[/]")
-        s = cache.stats()
+        s = cache.stats(args.league)
+        console.print(f"[dim]scope:[/] {args.league or 'all leagues'}")
         console.print(f"cached market checks: [bold]{s['market_checks']}[/]")
         console.print(f"dismissed items:      [bold]{s['dismissed']}[/]")
+    return 0
+
+
+def _print_dismissals(rows, league: str) -> None:
+    if not rows:
+        console.print(
+            f"[dim]Nothing dismissed in[/] [bold]{league}[/][dim].[/]\n"
+            "Every card in the HTML report prints the command to dismiss that item, and\n"
+            "[bold]poescan scan --json[/] writes an [bold]id[/] for each candidate."
+        )
+        return
+
+    table = Table(title=f"Dismissed items - {league}", header_style="bold")
+    table.add_column("item id")
+    table.add_column("dismissed", style="dim")
+    table.add_column("league", style="dim")
+    table.add_column("note")
+    for d in rows:
+        table.add_row(
+            d.item_id,
+            time.strftime("%Y-%m-%d", time.localtime(d.dismissed_at)),
+            "[yellow]every league[/]" if d.every_league else d.league,
+            d.note or "[dim]-[/]",
+        )
+    console.print(table)
+    console.print(
+        "\n[dim]These never expire. A dismissal is your judgement about the item, not a\n"
+        "price observation, so re-showing it in three days is the thing it exists to\n"
+        "stop. It is scoped to the league instead, because item ids follow items into\n"
+        "Standard when a league ends. Reverse one with[/] "
+        "[bold]poescan dismiss --undo <item-id>[/][dim].[/]"
+    )
+
+
+def cmd_dismiss(args) -> int:
+    """Stop re-pricing items already judged not worth it.
+
+    Roughly a quarter of the checks in a mature cache re-confirm junk - a
+    couple of chaos against hundreds of listings - every time the 72h cache
+    expires, and that budget is why a full scan takes half an hour. Dismissing
+    an item keeps it out of the report and off the budget while leaving the
+    price observation it produced in place, so `analyse` still reads it as the
+    negative half of its dataset.
+
+    Manual only, on purpose. Auto-dismissing on the junk signal would buy
+    budget with false negatives, which is the failure mode that costs money.
+    """
+    cfg = Config.load()
+    league = args.league or cfg.league
+    # Deduplicated so a repeated id cannot report itself both restored and
+    # never dismissed, which is what the second pass through it would say.
+    ids = list(dict.fromkeys(i.strip() for i in (args.item_ids or []) if i.strip()))
+
+    with Cache() as cache:
+        if args.list:
+            _print_dismissals(cache.dismissals(league), league)
+            return 0
+
+        if not ids:
+            return _err(
+                "no item ids given.\n"
+                "  [bold]poescan dismiss <item-id> --note 'flooded at 1c'[/]\n"
+                "  [bold]poescan dismiss --list[/]\n"
+                "  [bold]poescan dismiss --undo <item-id>[/]\n"
+                "Ids are printed on every card of the HTML report."
+            )
+
+        if args.undo:
+            restored = [i for i in ids if cache.undismiss(i, league)]
+            for i in ids:
+                if i in restored:
+                    console.print(f"[green]restored[/] {i}")
+                else:
+                    console.print(f"[dim]was not dismissed in {league}:[/] {i}")
+            # Nothing restored means every id was wrong, which is a failure
+            # worth an exit code rather than a cheerful no-op.
+            return 0 if restored else 1
+
+        for i in ids:
+            cache.dismiss(i, league, args.note or "")
+            console.print(f"[green]dismissed[/] {i}")
+            # A mistyped id dismisses nothing, for ever, and says nothing about
+            # it. This is the only moment the mistake is still cheap to notice.
+            if not cache.has_check(i, league):
+                console.print(
+                    f"  [yellow]![/] no market check on record for that id in {league} - "
+                    "expected if it was never priced, otherwise check the id"
+                )
+        console.print(
+            f"\n[dim]Future scans in[/] [bold]{league}[/][dim] will skip "
+            f"{len(ids)} item(s) and spend no market checks on them.\n"
+            "Reverse with[/] [bold]poescan dismiss --undo <item-id>[/][dim].[/]"
+        )
     return 0
 
 
@@ -843,8 +948,10 @@ def cmd_base_values(args) -> int:
     smaller - see poescan/ninja.py.
     """
     cfg = Config.load()
+    # Not resolved here: `fetch_base_types` does it on a cache miss, so a warm
+    # cache costs no requests at all rather than one for the league list.
+    league = args.league or cfg.league
     try:
-        league = ninja.resolve_league(args.league or cfg.league)
         if args.slots:
             for t in ninja.item_types(league):
                 console.print(f"  {t}")
@@ -1203,8 +1310,24 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--yes", action="store_true", help="skip the cost confirmation")
     s.set_defaults(func=cmd_survey_bases)
 
+    s = sub.add_parser(
+        "dismiss", help="stop re-pricing items you have already judged not worth it"
+    )
+    s.add_argument(
+        "item_ids",
+        nargs="*",
+        metavar="ITEM-ID",
+        help="ids from the report - each card prints the command to copy",
+    )
+    s.add_argument("--note", help="why, recorded for your own future reference")
+    s.add_argument("--league", help="override the configured league")
+    s.add_argument("--list", action="store_true", help="show what is currently dismissed")
+    s.add_argument("--undo", action="store_true", help="reverse the dismissal of these ids")
+    s.set_defaults(func=cmd_dismiss)
+
     s = sub.add_parser("cache", help="inspect or clear the cache")
     s.add_argument("--clear", action="store_true", help="drop cached market checks")
+    s.add_argument("--league", help="scope both the summary and --clear to one league")
     s.set_defaults(func=cmd_cache)
 
     s = sub.add_parser("refresh-data", help="re-download trade metadata")

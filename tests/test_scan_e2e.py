@@ -435,6 +435,96 @@ def test_relabelling_leaves_the_cache_age_alone(stubbed, cfg, index):
     assert _cached("tailwind-boots").checked_at == before
 
 
+# -- dismissals -------------------------------------------------------------
+#
+# Roughly a quarter of a mature cache is confirmed junk being re-priced every
+# time the 72h TTL expires, and that budget is why a full scan takes half an
+# hour. A dismissal is the user saying so once.
+
+
+def _dismiss(item_id: str, league: str = "Allflame", note: str = "") -> None:
+    import poescan.cache as cache_mod
+
+    with cache_mod.Cache() as cache:
+        cache.dismiss(item_id, league, note)
+
+
+def test_a_dismissed_item_is_not_shown_again(stubbed, cfg, index):
+    kw = dict(index=index, ruleset=Ruleset.load(), tabs_wanted=["dump1"])
+    assert "chaos-amulet" in {c.item.id for c in scan(cfg, token=None, **kw).candidates}
+
+    _dismiss("chaos-amulet")
+    rep = scan(cfg, token=None, **kw)
+    assert "chaos-amulet" not in {c.item.id for c in rep.candidates}
+    assert rep.dismissed_items == 1
+
+
+def test_a_dismissed_item_costs_no_market_check(stubbed, cfg, index):
+    """The point of the whole feature: it stops spending budget on known junk."""
+    kw = dict(index=index, ruleset=Ruleset.load(), tabs_wanted=["dump1"], cache_hours=0)
+    before = scan(cfg, token=None, **kw).market_checks
+
+    _dismiss("chaos-amulet")
+    assert scan(cfg, token=None, **kw).market_checks == before - 1
+
+
+def test_a_dismissal_does_not_reach_another_league(stubbed, cfg, index):
+    """Item ids follow items into Standard; the judgement about them does not."""
+    _dismiss("chaos-amulet", league="Standard")
+    rep = scan(cfg, token=None, index=index, ruleset=Ruleset.load(), tabs_wanted=["dump1"])
+    assert "chaos-amulet" in {c.item.id for c in rep.candidates}
+
+
+def test_a_dismissed_item_still_gets_its_cached_check_re_labelled(stubbed, cfg, index):
+    """Dismissing junk must not strand the evidence that it was junk.
+
+    Those rows are the negative half of the calibration dataset - what triage
+    should have discarded - and `analyse` sets aside anything labelled by
+    another ruleset, so each one needs a re-labelling pass to count at all.
+    Filtering dismissals out before the loop that re-labels (which is how this
+    was first written) makes them permanently invisible to `analyse`, silently
+    and for free. Re-labelling is a cache read; only the market check costs.
+    """
+    kw = dict(index=index, ruleset=Ruleset.load(), tabs_wanted=["dump1"])
+    scan(cfg, token=None, **kw)
+    priced_at = _cached("chaos-amulet").payload["listings"]
+
+    _dismiss("chaos-amulet")
+    retuned = _retuned_ruleset()
+    rep = scan(cfg, token=None, index=index, ruleset=retuned, tabs_wanted=["dump1"])
+
+    assert "chaos-amulet" not in {c.item.id for c in rep.candidates}
+    payload = _cached("chaos-amulet").payload
+    assert payload["item"]["ruleset"] == retuned.fingerprint, "the label must be brought up to date"
+    assert payload["listings"] == priced_at, "and the observation it explains must survive"
+
+
+def test_re_labelling_a_dismissed_item_spends_nothing(stubbed, cfg, index):
+    """It is a cache read, and it must not become a cache hit either - a
+    dismissed item produces no result for the report to count."""
+    kw = dict(index=index, ruleset=Ruleset.load(), tabs_wanted=["dump1"])
+    scan(cfg, token=None, **kw)
+
+    _dismiss("chaos-amulet")
+    rep = scan(cfg, token=None, index=index, ruleset=_retuned_ruleset(), tabs_wanted=["dump1"])
+    assert rep.market_checks == 0
+    assert rep.cache_hits == len(rep.candidates)
+
+
+def test_a_dismissed_observation_is_still_calibration_data(stubbed, cfg, index):
+    """What the re-labelling is for: `analyse` must still see the junk."""
+    import poescan.cache as cache_mod
+
+    kw = dict(index=index, ruleset=Ruleset.load(), tabs_wanted=["dump1"])
+    scan(cfg, token=None, **kw)
+    _dismiss("chaos-amulet")
+    scan(cfg, token=None, **kw)
+
+    with cache_mod.Cache() as cache:
+        obs = {o["item_id"]: o for o in cache.observations("Allflame")}
+    assert obs["chaos-amulet"]["median"] == 1.0  # FakeTrade prices it at 1/1/2
+
+
 # -- caveats on a cached price ----------------------------------------------
 #
 # `relaxed` and `tightened` say the query was not like-for-like: a widened one
@@ -538,6 +628,46 @@ def test_report_renders_html(stubbed, cfg, index, tmp_path):
     assert "https://example.test/" in html    # trade link is clickable
     assert "Tailwind" in html                 # mods are listed
     assert "dump1" in html                    # which tab to look in
+
+
+def test_the_report_prints_the_command_to_dismiss_each_item(stubbed, cfg, index, tmp_path):
+    """The HTML report is the primary interface, so it is where an item id has
+    to be reachable - copying one out of it is the whole workflow."""
+    rep = scan(cfg, token=None, index=index, ruleset=Ruleset.load(), tabs_wanted=["dump1"])
+    html = report_mod.render(rep, tmp_path / "r.html").read_text()
+    assert "poescan dismiss tailwind-boots" in html
+
+
+class _ScanArgs:
+    """argparse's namespace for `poescan scan`, with the defaults it sets."""
+
+    league = rules = promote_score = max_checks = out = json = None
+    tabs = "dump1"
+    no_verify = fresh = False
+    no_html = no_open = True
+    cache_hours = 72.0
+    status = "securable"
+
+
+def test_the_json_report_carries_an_id_for_each_candidate(
+    stubbed, cfg, index, tmp_path, monkeypatch
+):
+    """`poescan dismiss` takes an item id, and until now nothing published one -
+    the JSON report named items only by a label several could share."""
+    from pathlib import Path
+
+    from poescan import cli
+
+    monkeypatch.setattr(cli, "_auth", lambda _cfg: None)
+    monkeypatch.setattr(cli.Config, "load", classmethod(lambda c: cfg))
+    monkeypatch.setattr(cli, "load_stat_index", lambda: index)
+
+    args = _ScanArgs()
+    args.json = str(tmp_path / "scan.json")
+    assert cli.cmd_scan(args) == 0
+
+    payload = json.loads(Path(args.json).read_text())
+    assert "tailwind-boots" in {c["id"] for c in payload["candidates"]}
 
 
 def test_report_handles_empty_scan(tmp_path):
