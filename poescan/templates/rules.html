@@ -1,0 +1,446 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>poescan - the ruleset - {{ doc.settings.fingerprint }}</title>
+<style>
+  /* Palette copied verbatim from report.html: two divergent dark themes across
+     two pages of one tool is drift a user sees immediately. */
+  :root {
+    --bg: #0d0b08; --panel: #17130d; --panel2: #1f1a12; --line: #322920;
+    --text: #d6cbb2; --dim: #8a7d66; --rare: #ffff77; --magic: #8888ff;
+    --good: #7fbf5f; --warn: #d8a24a; --bad: #b4534a; --accent: #c9a227;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.5 "Segoe UI", system-ui, sans-serif; }
+  a { color: var(--accent); }
+  header { padding: 1.5rem 2rem; border-bottom: 1px solid var(--line);
+           background: linear-gradient(180deg, #1a150e, #0d0b08); }
+  h1 { margin: 0 0 .3rem; font-size: 1.35rem; color: var(--rare); font-weight: 600; }
+  .meta { color: var(--dim); font-size: .875rem; }
+  .stats { display: flex; flex-wrap: wrap; gap: 1.5rem; margin-top: .9rem; }
+  .stat b { display: block; font-size: 1.3rem; color: var(--text); font-weight: 600; }
+  .stat span { font-size: .75rem; color: var(--dim); text-transform: uppercase;
+               letter-spacing: .05em; }
+  main { padding: 1.5rem 2rem 4rem; max-width: 1100px; margin: 0 auto; }
+  h2 { font-size: .95rem; text-transform: uppercase; letter-spacing: .08em;
+       color: var(--accent); font-weight: 600; margin: 2.4rem 0 .8rem;
+       padding-bottom: .35rem; border-bottom: 1px solid var(--line); }
+  h2:first-of-type { margin-top: .6rem; }
+  h3 { margin: 0 0 .5rem; font-size: .72rem; text-transform: uppercase;
+       letter-spacing: .08em; color: var(--dim); font-weight: 600; }
+  p { margin: 0 0 .7rem; }
+  ul { margin: 0; padding-left: 1.1rem; }
+  li { margin-bottom: .2rem; }
+  code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .86em;
+         color: #bda874; word-break: break-word; }
+  .lead { max-width: 68ch; }
+  .disclaimer { background: #241d12; border-left: 3px solid var(--warn);
+                padding: .8rem 1rem; margin: .9rem 0; font-size: .9rem;
+                color: #cbb98f; max-width: 78ch; }
+  .disclaimer b { color: var(--warn); }
+  .note { background: #1a1710; border-left: 3px solid var(--line);
+          padding: .7rem 1rem; margin: .9rem 0; font-size: .85rem;
+          color: var(--dim); max-width: 82ch; }
+  .alarm { border-left-color: var(--bad); color: #d9b5ae; background: #241512; }
+  table { border-collapse: collapse; width: 100%; font-size: .875rem; }
+  th { text-align: left; color: var(--dim); font-weight: 600; font-size: .72rem;
+       text-transform: uppercase; letter-spacing: .06em;
+       border-bottom: 1px solid var(--line); padding: .35rem .6rem .35rem 0; }
+  td { padding: .3rem .6rem .3rem 0; border-bottom: 1px solid #221c14;
+       vertical-align: top; }
+  td.n { text-align: right; white-space: nowrap; color: var(--accent);
+         font-weight: 600; width: 3.5rem; }
+  td.veto-n { color: var(--bad); font-weight: 600; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+          margin-bottom: 1rem; overflow: hidden; scroll-margin-top: 1rem; }
+  .card.veto { border-color: #5a2b26; }
+  .card.flagged { border-color: #6b5a1e; }
+  .card-head { display: flex; justify-content: space-between; align-items: flex-start;
+               gap: 1rem; padding: .9rem 1.1rem; background: var(--panel2);
+               border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+  .name { color: var(--rare); font-weight: 600; font-size: 1.05rem;
+          font-family: ui-monospace, Menlo, Consolas, monospace; }
+  .base { color: var(--dim); font-size: .85rem; }
+  .score { text-align: right; white-space: nowrap; }
+  .score b { font-size: 1.4rem; color: var(--accent); }
+  .score.veto b { font-size: 1rem; color: var(--bad); }
+  .score span { display: block; font-size: .7rem; color: var(--dim);
+                text-transform: uppercase; letter-spacing: .05em; }
+  .body { display: grid; grid-template-columns: 1fr 1fr; gap: 1.1rem; padding: 1.1rem; }
+  @media (max-width: 760px) {
+    .body { grid-template-columns: 1fr; }
+    main, header { padding-left: 1rem; padding-right: 1rem; }
+  }
+  .clause { margin-bottom: .9rem; }
+  .clause ul { padding-left: 1.1rem; }
+  .clause li { font-size: .9rem; }
+  .clause li .pattern { display: block; color: var(--dim); font-size: .8rem; }
+  .tags { display: flex; gap: .35rem; flex-wrap: wrap; margin-top: .4rem; }
+  .tag { font-size: .68rem; padding: .12rem .45rem; border-radius: 3px;
+         background: #2a2317; color: #bda874; border: 1px solid #3d3322; }
+  .tag.not { background: #241512; color: #c58c85; border-color: #4a2a25; }
+  .tag-label { font-size: .68rem; color: var(--dim); align-self: center; }
+  .tag.every { background: #1c2318; color: #9dbd8a; border-color: #2f4029; }
+  .badge { font-size: .68rem; padding: .12rem .45rem; border-radius: 3px;
+           text-transform: uppercase; letter-spacing: .04em; }
+  .badge.problem { background: #3a1a16; color: #e0a49b; border: 1px solid #6b302a; }
+  .badge.caution { background: #33280f; color: var(--warn); border: 1px solid #5d4a1c; }
+  .findings { border-top: 1px solid var(--line); background: #12100a;
+              padding: .7rem 1.1rem; font-size: .85rem; }
+  .findings li.problem { color: #e0a49b; }
+  .findings li.caution { color: var(--warn); }
+  .band { border-top: 1px solid var(--line); background: #141a12;
+          padding: .55rem 1.1rem; font-size: .85rem; color: #9dbd8a; }
+  .measured { border-top: 1px solid var(--line); background: #12100a;
+              padding: .55rem 1.1rem; font-size: .85rem; color: var(--dim); }
+  .measured b { color: var(--text); }
+  .measured b.good { color: var(--good); }
+  .measured b.bad { color: var(--bad); }
+  .caveat { display: block; color: var(--warn); font-size: .78rem; }
+  .slot-index { columns: 2; column-gap: 2rem; }
+  @media (max-width: 760px) { .slot-index { columns: 1; } }
+  .slot-group { break-inside: avoid; margin-bottom: 1.1rem; }
+  .slot-group ul { list-style: none; padding-left: 0; }
+  .slot-group li { font-size: .85rem; color: var(--dim); }
+  .slot-group li b { color: var(--accent); font-weight: 600;
+                     display: inline-block; min-width: 2rem; }
+  dl { margin: 0; }
+  dt { color: var(--rare); font-family: ui-monospace, Menlo, Consolas, monospace;
+       font-size: .85rem; margin-top: .7rem; }
+  dt em { color: var(--text); font-family: "Segoe UI", system-ui, sans-serif;
+          font-style: normal; }
+  dd { margin: .15rem 0 0; color: var(--dim); font-size: .875rem; max-width: 78ch; }
+  footer { color: var(--dim); font-size: .8rem; padding: 0 2rem 3rem;
+           max-width: 1100px; margin: 0 auto; }
+</style>
+</head>
+<body>
+<header>
+  <h1>poescan &mdash; how items are scored</h1>
+  <div class="meta">
+    ruleset <b>{{ doc.settings.fingerprint }}</b> &middot;
+    {{ doc.rules|length }} scoring rule{{ '' if doc.rules|length == 1 else 's' }},
+    {{ doc.veto|length }} veto{{ '' if doc.veto|length == 1 else 'es' }} &middot;
+    {% if league %}league <b>{{ league }}</b> &middot; {% endif %}
+    generated {{ generated }}
+  </div>
+  <div class="stats">
+    <div class="stat"><b>{{ '%g'|format(doc.settings.promote_score) }}</b><span>promote score</span></div>
+    <div class="stat"><b>{{ doc.settings.min_ilvl }}</b><span>item level floor</span></div>
+    <div class="stat"><b>{{ doc.settings.max_market_checks }}</b><span>market checks per scan</span></div>
+  </div>
+</header>
+
+<main>
+  <div class="disclaimer">
+    <b>A score is a threshold, not a valuation.</b>
+    These numbers decide one thing: whether an item is worth spending a trade API
+    call on. They are not a prediction of what it sells for, and measured against
+    a real dump tab they were not one &mdash; the highest-scoring item in the set
+    (31) was worth 2 chaos, while items scoring 12 ran anywhere from 1 to 25
+    chaos. What tracked value was scarcity: 5&ndash;21 comparable listings meant
+    20&ndash;65c, and 500+ meant 1&ndash;2c. So read the table below as
+    <em>what poescan looks at</em>, never as what poescan thinks things are worth.
+    Its whole job is to discard the obvious nothing &mdash; about 73% of rares
+    &mdash; so the API budget reaches the rest.
+  </div>
+
+  <div class="disclaimer">
+    <b>Every score here was written by hand. Nothing measured them.</b>
+    All {{ doc.rules|length + doc.veto|length }} are informed guesses about the
+    game, and the repo's own finding that score does not predict price is what
+    unmeasured guesses look like. <code>poescan analyse</code> is the instrument
+    that corrects them, from price observations your own scans already paid for.
+    It judges a rule on its <em>tail</em> &mdash; the valuable item it caught
+    &mdash; and not on its median, because a filter is judged by what it wrongly
+    discards: of 16 observations worth 50c or more, 12 scored in the lowest band,
+    and the most valuable item in the set (820c) scored exactly the promote
+    score. Treat a big number below as an author's opinion, with a paper trail.
+  </div>
+
+  {% if doc.problems or doc.cautions %}
+  <div class="note alarm">
+    {% if doc.problems %}<b>{{ doc.problems|length }} problem(s)</b> and {% endif %}
+    {{ doc.cautions|length }} caution(s) found in this ruleset, marked on the
+    cards below. A <b>problem</b> is a condition no item can ever satisfy, so its
+    rule is dead; a <b>caution</b> is a condition satisfied more widely than it
+    reads, usually one that is true for every item.
+  </div>
+  {% endif %}
+
+  <div class="note">
+    These findings report only what <code>poescan validate-rules</code>
+    structurally cannot see: conditions that are well formed, built from keys the
+    evaluator recognises, and nevertheless dead or always true. Unknown flags,
+    pseudo fields, categories, mod templates, stat ids, base types and broken
+    regexes are that command's job, and it owns the exit code &mdash; this one
+    always succeeds, because it is the only tool that renders a broken rule
+    <em>visibly</em>, and dying mid-edit would make it useless.
+  </div>
+
+  <h2 id="judged">How an item is judged</h2>
+  <ol class="lead">
+    {% for step in doc.settings.order %}<li>{{ step }}</li>{% endfor %}
+  </ol>
+  <h3 style="margin-top:1rem">Rejected before any rule runs</h3>
+  <ul class="lead">
+    {% for gate in doc.settings.gates %}<li>{{ gate }}</li>{% endfor %}
+  </ul>
+
+  <h2 id="summary">Every rule at a glance</h2>
+  <table>
+    <thead><tr><th>score</th><th>rule</th><th>what it is for</th><th>slots</th></tr></thead>
+    <tbody>
+      {% for c in doc.veto %}
+      <tr>
+        <td class="n veto-n">veto</td>
+        <td><a href="#{{ c.anchor }}">{{ c.id }}</a></td>
+        <td>{{ c.note }}</td>
+        <td>{% if c.universal %}every slot{% else %}{{ c.slots|map(attribute='label')|join(', ') }}{% endif %}</td>
+      </tr>
+      {% endfor %}
+      {% for c in doc.by_score %}
+      <tr>
+        <td class="n">{{ c.score_text }}</td>
+        <td><a href="#{{ c.anchor }}">{{ c.id }}</a></td>
+        <td>{{ c.note }}</td>
+        <td>{% if c.universal %}every slot{% else %}{{ c.slots|map(attribute='label')|join(', ') }}{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  {% macro card(c, is_veto=false) %}
+  <div class="card {% if is_veto %}veto{% elif c.findings %}flagged{% endif %}" id="{{ c.anchor }}">
+    <div class="card-head">
+      <div>
+        <div class="name">{{ c.id }}</div>
+        <div class="base">{{ c.note or 'no note' }}</div>
+        <div class="tags">
+          {% if c.universal %}<span class="tag every">every slot</span>{% endif %}
+          {% for s in c.slots %}<span class="tag">{{ s.label }}</span>{% endfor %}
+          {% if c.excluded %}<span class="tag-label">except:</span>
+            {% for s in c.excluded %}<span class="tag not">{{ s.label }}</span>{% endfor %}
+          {% endif %}
+          {# Counted, not one badge per finding: five conditions gone wrong in one
+             rule rendered as "problem problem problem caution caution". #}
+          {% set probs = c.findings|selectattr('is_problem')|list %}
+          {% set cauts = c.findings|rejectattr('is_problem')|list %}
+          {% if probs %}<span class="badge problem">{{ probs|length }} problem{{ '' if probs|length == 1 else 's' }}</span>{% endif %}
+          {% if cauts %}<span class="badge caution">{{ cauts|length }} caution{{ '' if cauts|length == 1 else 's' }}</span>{% endif %}
+        </div>
+      </div>
+      <div class="score {% if is_veto %}veto{% endif %}">
+        {% if is_veto %}<b>veto</b><span>discards the item</span>
+        {% else %}<b>{{ c.score_text }}</b><span>points</span>{% endif %}
+      </div>
+    </div>
+
+    <div class="body">
+      {% for g in c.groups %}
+      <div class="clause">
+        <h3>{{ g.lead }}</h3>
+        <ul>
+          {% for line in g.lines %}
+          <li>{{ line.text|codespans }}
+            {% for d in line.detail %}<code class="pattern">{{ d }}</code>{% endfor %}
+          </li>
+          {% endfor %}
+        </ul>
+      </div>
+      {% endfor %}
+    </div>
+
+    {% if c.band %}<div class="band">{{ c.band.text|codespans }}</div>{% endif %}
+
+    {% if c.findings %}
+    <div class="findings">
+      <ul>
+        {% for f in c.findings %}<li class="{{ f.level }}"><b>{{ f.level }}:</b> {{ f.text|codespans }}</li>{% endfor %}
+      </ul>
+    </div>
+    {% endif %}
+
+    {# Four numbers or none: n, median, best and the tail count travel together.
+       A median on its own is what misled this repo for months. #}
+    {% if evidence %}
+    {% set g = evidence.measured(c.id) %}
+    <div class="measured">
+      {% if is_veto %}
+        <b>cannot be measured</b> &mdash; a vetoed item never reaches a market
+        check, so no price observation of one can exist, and nothing here counts
+        as evidence for or against this rule.
+      {% elif g and g.n %}
+        fired on <b>{{ g.n }}</b> priced item{{ '' if g.n == 1 else 's' }} &middot;
+        median <b class="{{ evidence.tone(g.median) }}">{{ '%.0f'|format(g.median) }}c</b> &middot;
+        best {{ '%.0f'|format(g.best) }}c &middot;
+        <b>{{ g.tail }}</b> over {{ '%g'|format(g.threshold) }}c
+        {% if evidence.anecdote(g) %}
+        <span class="caveat">n={{ g.n }} &mdash; an anecdote, not a measurement</span>
+        {% endif %}
+      {% else %}
+        <b>not measured</b> &mdash; no priced observation has hit this rule yet,
+        which is not the same as having been measured and found worthless.
+      {% endif %}
+    </div>
+    {% endif %}
+  </div>
+  {% endmacro %}
+
+  <h2 id="vetoes">Vetoes &mdash; these run first</h2>
+  <p class="lead">A veto discards the item outright, before a single point is
+  scored. That also makes a veto the one rule whose cost cannot be seen: a
+  vetoed item is never priced, so no observation of it exists, and nothing here
+  measures what it threw away. That is the direct corollary of judging a filter
+  by what it wrongly discards.</p>
+  {% for c in doc.veto %}{{ card(c, is_veto=true) }}{% endfor %}
+
+  <h2 id="rules">The scoring rules</h2>
+  <p class="lead">Highest score first. Scores are additive: an item hitting three
+  rules gets all three. Each rule appears exactly once on this page &mdash; the
+  slot index below links back here rather than repeating them.</p>
+  {% for c in doc.by_score %}{{ card(c) }}{% endfor %}
+
+  <h2 id="slots">Which rules apply to which slot</h2>
+  <div class="slot-index">
+    {% for section in doc.sections %}
+    <div class="slot-group" id="{{ section.anchor }}">
+      <h3>{{ section.label }} &middot; {{ section.rules|length }}</h3>
+      <ul>
+        {% for c in section.rules %}
+        <li><b>{{ c.score_text }}</b> <a href="#{{ c.anchor }}">{{ c.id }}</a> &mdash; {{ c.note }}</li>
+        {% endfor %}
+      </ul>
+    </div>
+    {% endfor %}
+  </div>
+
+  <h2 id="glossary">Pseudo totals</h2>
+  <p class="lead">Rares are priced on totals, not on single lines, so these are
+  what the rules above test. All of them are aggregated from explicit, implicit,
+  crafted and fractured mods; an enchant or a veiled mod contributes nothing.</p>
+  <dl>
+    {% for t in doc.pseudos %}
+    <dt>{{ t.name }} &mdash; <em>{{ t.label }}{% if t.unit %} ({{ t.unit }}){% endif %}</em></dt>
+    <dd>{{ t.definition|codespans }}</dd>
+    {% endfor %}
+  </dl>
+
+  <h2 id="flags">Flags</h2>
+  <dl>
+    {% for t in doc.flags %}
+    <dt>{{ t.name }} &mdash; <em>{{ t.label }}</em></dt>
+    <dd>{{ t.definition|codespans }}</dd>
+    {% endfor %}
+  </dl>
+
+  <h2 id="scalars">Numbers on the item itself</h2>
+  <p class="lead">These take their bound nested under the selector:
+  <code>{ilvl: {min: 86}}</code>.</p>
+  <dl>
+    {% for t in doc.scalars %}
+    <dt>{{ t.name }} &mdash; <em>{{ t.label }}{% if t.unit %} ({{ t.unit }}){% endif %}</em></dt>
+    <dd>{{ t.definition|codespans }}</dd>
+    {% endfor %}
+  </dl>
+
+  <h2 id="evidence">What the market has actually said</h2>
+  {% if not evidence %}
+  <p class="lead">No evidence was read for this page. Run it without
+  <code>--no-evidence</code> to pair every rule with the prices of the items it
+  fired on &mdash; those observations are already paid for and stored, and reading
+  them costs no API calls.</p>
+  {% else %}
+  <p class="lead">
+    <b>{{ evidence.observations }}</b> stored observation{{ '' if evidence.observations == 1 else 's' }}{% if league %} in {{ league }}{% endif %},
+    <b>{{ evidence.considered }}</b> from this ruleset, <b>{{ evidence.priced }}</b> of those priced.
+    {% if evidence.baseline %}The median promoted item was
+    <b>{{ '%.0f'|format(evidence.baseline) }}c</b>, which is the base rate every
+    median below is coloured against.{% endif %}
+  </p>
+  <p class="lead">Each rule carries four numbers or none: how many priced items it
+  fired on, their median, the best one, and how many cleared
+  {{ '%g'|format(evidence.threshold) }}c. The last is the one that matters. Triage
+  is a filter, and a filter is judged by what it wrongly discards, so a rule earns
+  its place by the valuable item it caught and not by its typical one &mdash;
+  <code>fractured</code> is the standing example, with a median that says delete
+  it and a tail that says the opposite.</p>
+
+  {% if evidence.setaside and not evidence.pooled %}
+  <div class="note">
+    <b>{{ evidence.setaside }} of {{ evidence.observations }} observations set aside</b>,
+    labelled by a ruleset other than
+    <code>{{ doc.settings.fingerprint }}</code>{% if evidence.vocabularies %}
+    ({% for name, n in evidence.vocabularies[:3] %}{{ name }} &times;{{ n }}{{ ', ' if not loop.last }}{% endfor %}{% if evidence.vocabularies|length > 3 %}, &hellip;{% endif %}){% endif %}.
+    Their prices are real; their rule labels describe rules that may no longer
+    exist. One ordinary <code>poescan scan</code> over the same tabs re-labels the
+    cached ones for <b>zero API calls</b>, because a cache hit already has a
+    freshly scored verdict in hand.
+  </div>
+  {% elif evidence.setaside and evidence.pooled %}
+  <div class="note alarm">
+    <b>Pooling {{ evidence.setaside }} observations from other rulesets.</b>
+    Their <code>rules_hit</code> lists were written by rules that may no longer
+    exist, so every per-rule number below mixes vocabularies. Read it as a hint,
+    not as measurement.
+  </div>
+  {% endif %}
+
+  {% if evidence.priced == 0 %}
+  <div class="note">
+    Nothing here is priced yet, so every rule reads "not measured". A scan over
+    the same tabs will re-label the cached checks at no API cost.
+  </div>
+  {% elif evidence.thin %}
+  <div class="note">
+    <b>Small sample.</b> {{ evidence.priced }} priced observations is direction,
+    not calibration. A row backed by two items is an anecdote whichever column you
+    read it in, and rows thin enough to say so are marked on their cards.
+  </div>
+  {% endif %}
+
+  {% if evidence.together %}
+  <h3 style="margin-top:1.4rem">Rules that fired on the same item</h3>
+  <p class="lead">Counted from the observations, never inferred from the
+  thresholds. Scores are additive, so a pair that almost always fires together is
+  not two signals but one signal charged twice &mdash; which is exactly what the
+  nested life bands turned out to be.</p>
+  <table>
+    <thead><tr><th>rule</th><th>rule</th><th>items</th></tr></thead>
+    <tbody>
+      {% for first, second, n in evidence.together[:15] %}
+      <tr>
+        <td><a href="#{{ first|ruleanchor }}">{{ first }}</a></td>
+        <td><a href="#{{ second|ruleanchor }}">{{ second }}</a></td>
+        <td class="n">{{ n }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+
+  {% if evidence.never_fired %}
+  <h3 style="margin-top:1.4rem">Never fired on a priced item &middot; {{ evidence.never_fired|length }}</h3>
+  <p class="lead">An unmeasured rule has not been found worthless &mdash; it has
+  not been measured. Several of these cannot fire on anything in your stash simply
+  because you do not pick that slot up.</p>
+  <p class="lead">{% for rid in evidence.never_fired|sort %}<a href="#{{ rid|ruleanchor }}">{{ rid }}</a>{{ ', ' if not loop.last }}{% endfor %}</p>
+  {% endif %}
+  {% endif %}
+</main>
+
+<footer>
+  Written by hand, corrected by measurement. The prices above were paid for by
+  scans you already ran; <code>poescan analyse</code> reads the same observations
+  back in a terminal, with the score bands and base types this page leaves out.
+  Neither spends an API call.
+  <p>Ruleset <code>{{ doc.settings.fingerprint }}</code>, from
+  <code>poescan/rules/default.yaml</code> unless <code>--rules</code> said
+  otherwise. Editing it is expected; run <code>poescan validate-rules</code>
+  afterwards.</p>
+</footer>
+</body>
+</html>

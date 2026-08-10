@@ -142,6 +142,21 @@ def fingerprint(data: dict) -> str:
 # Condition evaluation
 # --------------------------------------------------------------------------
 
+
+@dataclass(frozen=True)
+class Term:
+    """What one selector name means, in the words a user would use.
+
+    Kept beside the getter it describes rather than in ``explain.py``, so that
+    someone adding a pseudo field, flag or scalar sees the missing entry in
+    their own diff instead of discovering it as an "unknown" on a page.
+    """
+
+    label: str
+    definition: str
+    unit: str = ""
+
+
 _PSEUDO_FIELDS = {
     "life": lambda p: p.effective_life,
     "flat_life": lambda p: p.life,
@@ -155,6 +170,77 @@ _PSEUDO_FIELDS = {
     "count_resistances": lambda p: float(p.count_resistances),
     "count_elemental_resistances": lambda p: float(p.count_elemental_resistances),
     "attributes": lambda p: p.total_attributes,
+}
+
+# One entry per key above; read by `explain.py` to document the ruleset.
+#
+# Every total here is aggregated from explicit, implicit, crafted and fractured
+# mods only - an enchant or a veiled mod contributes nothing (`pseudo.compute`).
+# Three of these definitions are the ones that get assumed wrongly: `#%
+# increased maximum Life` lands in `increased_life` and *not* in `life`, "all
+# Elemental" expands to three resistances while plain "all" expands to four, and
+# the two counts only count resistances that are positive.
+_PSEUDO_LABELS = {
+    "life": Term(
+        "effective life",
+        "Flat maximum Life plus half the item's Strength, since each point of "
+        "Strength grants half a life. `#% increased maximum Life` is not part of "
+        "it - a percentage of an unknown pool is not a number of life.",
+    ),
+    "flat_life": Term(
+        "flat maximum Life",
+        "The `+# to maximum Life` rolls added up, ignoring Strength.",
+    ),
+    "increased_life": Term(
+        "increased maximum Life",
+        "The `#% increased maximum Life` rolls added up. Counted here and nowhere "
+        "else, so it never inflates a flat life total.",
+        unit="%",
+    ),
+    "energy_shield": Term(
+        "flat maximum Energy Shield",
+        "The `+# to maximum Energy Shield` rolls added up.",
+    ),
+    "increased_es": Term(
+        "increased maximum Energy Shield",
+        "The `#% increased maximum Energy Shield` rolls added up.",
+        unit="%",
+    ),
+    "mana": Term(
+        "flat maximum Mana", "The `+# to maximum Mana` rolls added up."
+    ),
+    "elemental_resistance": Term(
+        "total elemental resistance",
+        "Fire plus Cold plus Lightning. `+#% to all Elemental Resistances` counts "
+        "three times, once per element.",
+        unit="%",
+    ),
+    "total_resistance": Term(
+        "total resistance",
+        "Fire, Cold, Lightning and Chaos added up. `+#% to all Elemental "
+        "Resistances` counts three times and `+#% to all Resistances` four times.",
+        unit="%",
+    ),
+    "chaos_resistance": Term(
+        "Chaos resistance",
+        "Chaos resistance alone, however it was granted.",
+        unit="%",
+    ),
+    "count_resistances": Term(
+        "resistances covered",
+        "How many of Fire, Cold, Lightning and Chaos are greater than zero. A "
+        "negative roll does not count, and does not subtract either.",
+    ),
+    "count_elemental_resistances": Term(
+        "elemental resistances covered",
+        "How many of Fire, Cold and Lightning are greater than zero. A negative "
+        "roll does not count.",
+    ),
+    "attributes": Term(
+        "total attributes",
+        "Strength plus Dexterity plus Intelligence. `+# to all Attributes` counts "
+        "three times, and a hybrid such as `+# to Strength and Dexterity` twice.",
+    ),
 }
 
 _FLAGS = {
@@ -172,6 +258,41 @@ _FLAGS = {
     "warlord": lambda it: "warlord" in it.influences,
 }
 
+# One entry per flag above, worded as an affirmative predicate so that `is:
+# false` can be rendered by negating it.
+_FLAG_LABELS = {
+    "influenced": Term(
+        "has an influence",
+        "Carries at least one influence: Shaper, Elder, Crusader, Hunter, "
+        "Redeemer or Warlord.",
+    ),
+    "fractured": Term(
+        "is fractured",
+        "Has at least one fractured mod, which is locked in place and cannot be "
+        "rerolled - the reason fractured items sell as crafting bases.",
+    ),
+    "synthesised": Term(
+        "is synthesised", "A synthesised item, which carries special implicits."
+    ),
+    "corrupted": Term(
+        "is corrupted", "Corrupted, so it can no longer be crafted on."
+    ),
+    "mirrored": Term(
+        "is mirrored", "A mirrored copy, which cannot be traded at all."
+    ),
+    "identified": Term(
+        "is identified",
+        "Identified, so its mods are visible. Unidentified rares are rejected "
+        "before any rule runs.",
+    ),
+    "shaper": Term("has Shaper influence", "Shaper-influenced."),
+    "elder": Term("has Elder influence", "Elder-influenced."),
+    "crusader": Term("has Crusader influence", "Crusader-influenced."),
+    "hunter": Term("has Hunter influence", "Hunter-influenced."),
+    "redeemer": Term("has Redeemer influence", "Redeemer-influenced."),
+    "warlord": Term("has Warlord influence", "Warlord-influenced."),
+}
+
 _SCALARS = {
     "ilvl": lambda it: float(it.ilvl),
     "links": lambda it: float(it.links),
@@ -179,6 +300,27 @@ _SCALARS = {
     "quality": lambda it: float(it.quality),
     "influence_count": lambda it: float(len(it.influences)),
     "mod_count": lambda it: float(len(it.mods_in("explicit", "fractured"))),
+}
+
+# One entry per scalar above. Note these take their `min`/`max` *nested* under
+# the selector key - `{ilvl: {min: 86}}` - unlike every other family.
+_SCALAR_LABELS = {
+    "ilvl": Term("item level", "The item level, which decides which mod tiers could roll."),
+    "links": Term(
+        "linked sockets",
+        "The size of the largest linked group, not the number of sockets.",
+    ),
+    "sockets": Term("sockets", "How many sockets the item has, linked or not."),
+    "quality": Term("quality", "The item's quality.", unit="%"),
+    "influence_count": Term(
+        "number of influences",
+        "How many influences the item carries; two makes it a rare crafting base.",
+    ),
+    "mod_count": Term(
+        "number of explicit or fractured mods",
+        "Counts explicit and fractured mods only. Implicit, crafted, enchant and "
+        "veiled mods are not counted.",
+    ),
 }
 
 
@@ -209,6 +351,12 @@ CONDITION_VALUE_KEYS = frozenset().union(*SELECTOR_FAMILIES)
 # with one freely: `{pseudo: attributes, min: 70}` is the normal form.
 CONDITION_MODIFIER_KEYS = frozenset({"min", "max", "abs", "is"})
 CONDITION_KEYS = CONDITION_VALUE_KEYS | CONDITION_MODIFIER_KEYS
+
+# The keys under a rule that hold conditions. `_conditions_hold` combines each
+# one differently, so it reads them by name rather than iterating this; every
+# other caller - `ambiguous_conditions`, `validate-rules`, `explain` - only
+# needs to visit all three, and was keeping its own copy of the list.
+CONDITION_SECTIONS = ("all", "any", "none")
 
 FLAG_NAMES = frozenset(_FLAGS)
 PSEUDO_NAMES = frozenset(_PSEUDO_FIELDS)
@@ -274,7 +422,7 @@ def ambiguous_conditions(data: dict) -> list[AmbiguousCondition]:
             if not isinstance(rule, dict):
                 continue
             rule_id = str(rule.get("id", "?"))
-            for group in ("all", "any", "none"):
+            for group in CONDITION_SECTIONS:
                 for cond in rule.get(group) or []:
                     keys = conflicting_selectors(cond)
                     if keys:
@@ -402,6 +550,9 @@ def _rule_applies(rule: dict, item: Item) -> bool:
 
 
 def _conditions_hold(rule: dict, item: Item, p: Pseudo) -> "tuple[bool, list]":
+    # The three sections of `CONDITION_SECTIONS`, read by name: each is combined
+    # differently below, so unpacking them positionally would let a reorder of
+    # that constant silently turn an exclusion into a requirement.
     all_conds = rule.get("all") or []
     any_conds = rule.get("any") or []
     none_conds = rule.get("none") or []

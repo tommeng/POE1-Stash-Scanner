@@ -234,6 +234,7 @@ is not worth that risk.
 ### Other commands
 
 ```bash
+uv run poescan explain-rules # the whole ruleset as a webpage: every rule, in English, with its score
 uv run poescan analyse       # what your accumulated market checks say about the ruleset
 uv run poescan budget        # remaining API allowance, from saved state
 uv run poescan cache         # how much is cached (--league to scope it)
@@ -242,7 +243,7 @@ uv run poescan base-values --slot Ring --influence Shaper --ilvl 84
 uv run poescan survey-bases --category accessory.ring --ilvl 84 --influence shaper
 ```
 
-`analyse` and `budget` make no requests at all.
+`explain-rules`, `analyse` and `budget` make no requests at all.
 
 `base-values` is what an unrolled base type sells for, imported from poe.ninja's economy API — one
 request covering every slot, cached for a day. `survey-bases` measures the same thing directly from
@@ -321,12 +322,27 @@ almost always belongs alongside an `ilvl` or mod condition rather than scoring o
 
 ```bash
 uv run poescan validate-rules   # every mod string, regex, flag, pseudo field, base and category
+uv run poescan explain-rules    # the ruleset as a webpage: every rule in English, with its score
 uv run poescan categories       # valid category ids
 ```
 
 `validate-rules` matters more than it sounds. Every condition kind fails *closed*: a typo in a flag
 name or a mod template doesn't error, the rule just silently never fires, forever. Run it after
 every edit.
+
+`explain-rules` is the other half of that. It renders the loaded ruleset as a single self-contained
+page — every rule and veto with its score, its conditions written out in English, the pseudo
+aggregates defined, and what your own market checks measured about each rule. It reads the YAML you
+point it at, so it is also how you check that a rule you just wrote says what you meant.
+
+The two divide the work by what each can see. `validate-rules` catches names that don't exist.
+`explain-rules` catches conditions that are *well formed and still wrong* — a threshold quoted as
+`"86"` (never satisfiable, because it is a string), a `pseudo` with no `min` (true of every item), a
+`min` sitting beside `ilvl` instead of inside it (silently ignored), an unknown flag under
+`is: false` (also true of every item). None of those are typos in a name, so `validate-rules` passes
+them; all of them are invisible in the YAML. Because that split is the point, a clean card on the
+page means "no problem found", not "not checked" — and `explain-rules` always exits 0, so it stays
+usable mid-edit. `validate-rules` owns the exit code.
 
 Two warnings, both learned by measurement:
 

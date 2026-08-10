@@ -101,6 +101,42 @@ def test_never_fired_lists_unmeasured_rules():
     assert "fractured" in fired
 
 
+# -- rules that fire together -----------------------------------------------
+
+
+def test_co_occurrence_counts_pairs_from_the_observations():
+    """Measured, not inferred. The static heuristic for "these two stack" was
+    built and cut: it produced four wrong pairs out of six on the real ruleset and
+    missed the largest true one, because those two rules name different selectors.
+    """
+    rows = [
+        obs(5.0, rules=["influenced", "double-influenced"]),
+        obs(6.0, rules=["influenced", "double-influenced"]),
+        obs(7.0, rules=["influenced", "fractured"]),
+        obs(8.0, rules=["influenced"]),
+    ]
+    assert cal.co_occurrence(rows) == [
+        ("double-influenced", "influenced", 2),
+        ("fractured", "influenced", 1),
+    ]
+
+
+def test_a_rule_firing_alone_makes_no_pair():
+    assert cal.co_occurrence([obs(5.0, rules=["influenced"]), obs(5.0)]) == []
+
+
+def test_a_rule_listed_twice_on_one_item_is_not_a_pair_with_itself():
+    """`rules_hit` is written from a list, so a malformed row could repeat an id;
+    pairing it with itself would report a rule as stacking on itself."""
+    assert cal.co_occurrence([obs(5.0, rules=["influenced", "influenced"])]) == []
+
+
+def test_the_good_multiple_is_shared_rather_than_restated():
+    """`analyse` colours a terminal, `explain-rules` names a CSS class, and both
+    have to agree on which median counts as good news."""
+    assert cal.GOOD_MULTIPLE == 2.0
+
+
 # -- ruleset vocabulary -----------------------------------------------------
 
 

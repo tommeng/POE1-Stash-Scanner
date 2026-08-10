@@ -10,6 +10,10 @@ authors = [{ name = "tommeng" }]
 dependencies = [
     "httpx>=0.28.1",
     "jinja2>=3.1.6",
+    # jinja2 already requires it; named here because `report.codespans` imports
+    # it directly, and an escape-before-markup filter must not depend on a
+    # transitive pin to keep working.
+    "markupsafe>=2.1",
     "pyyaml>=6.0.3",
     "rich>=15.0.0",
 ]
