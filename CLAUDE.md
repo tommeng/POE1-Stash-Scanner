@@ -6,10 +6,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 uv sync                                   # install
-uv run pytest                             # 353 tests, ~4.3s (fully offline)
+uv run pytest                             # 450 tests, ~5s (fully offline)
 uv run pytest tests/test_ratelimit.py     # one file
 uv run pytest -k test_reduced_resolves    # one test by name
 uv run poescan validate-rules             # every mod string and base name in the ruleset really exists
+uv run poescan explain-rules              # the ruleset as a webpage; makes no requests
 uv run poescan budget                     # remaining API allowance; reads saved state, makes no requests
 uv run poescan analyse                    # what the accumulated checks say; makes no requests
 uv run poescan base-values --slot Ring --influence Shaper --ilvl 84   # poe.ninja aggregate
@@ -164,6 +165,50 @@ poe.ninja's `count` is a **capped sample** (it saturates at 399), not a listing 
 `ninja.py` exposes it as `samples` with `listings` alongside, because reading one as the other
 reintroduces exactly the saturating-denominator error that killed the survey's third design. A zero from a thin
 sample is still a thin sample. `TradeClient.base_value` is kept as the independent spot-check.
+
+### The ruleset as a page (`explain-rules`, `explain.py`)
+
+`poescan explain-rules` renders the loaded ruleset to one self-contained HTML file: every rule and
+veto with its score, its conditions in English, the pseudo glossary, and the per-rule evidence
+`analyse` computes. Offline, no stash read, no trade call. `explain.py` is pure — dataclasses and
+wording, no I/O — with `report.render_rules` and the template doing the rendering, mirroring the
+`calibration.py` / `cmd_analyse` split.
+
+Four decisions are load-bearing:
+
+- **The lint's scope is deliberately the complement of `validate-rules`.** That command catches names
+  that do not exist. This page catches conditions that are well formed, built from keys the evaluator
+  recognises, and still wrong: `{ilvl: "86"}` (a string, never satisfiable), `{pseudo: life}` with no
+  bound (`_in_range` on an unbounded dict returns True, so it is true of every item), a `min` beside
+  `ilvl` rather than inside it (the scalar branch reads `cond[key]` and never sees it), an unknown
+  flag under `is: false`. Because the split is the point, **a clean card means "no problem", not "not
+  checked"** — so widening the lint into `validate-rules`' territory breaks that contract, and
+  narrowing it makes the page lie by omission. `explain-rules` always exits 0; `validate-rules` owns
+  the exit code, because a documentation command that dies mid-edit is useless.
+- **The page must keep saying the score is a filter, not a valuation, and that the scores are
+  hand-authored priors.** Ranking 49 numbers by size is a persuasive-looking claim about value, which
+  is the claim this file exists to deny. Two tests pin that copy.
+- **Modifier consumption is verified against the evaluator, not asserted.** `_CONSUMES` declares which
+  of `min`/`max`/`abs`/`is` each selector family reads; a test runs synthetic conditions through
+  `evaluate_condition` with and without each one and compares. That is what makes the ignored-modifier
+  lint trustworthy, and it is the only part of this feature structurally incapable of drifting.
+  Renderers are likewise keyed on `SELECTOR_FAMILIES` rather than a hand-kept list — a flat
+  `CONDITION_VALUE_KEYS` comparison would pass even if the families were regrouped.
+- **Rule interactions are counted, not inferred.** The obvious static heuristic for "these two rules
+  stack" (same slot, same selector, different `min`) yields four false positives to two true ones on
+  the shipped ruleset — worst is `helm-socketed-gem-level` (22, min 2) against
+  `chest-socketed-gem-level` (24, min 1), where the higher threshold carries the lower score, so the
+  generated sentence would be arithmetically false. `calibration.co_occurrence` counts pairs in
+  `rules_hit` instead, which is measured, cannot produce a false positive, and catches the biggest
+  real interaction the heuristic misses: `influenced` + `double-influenced` = 26 on any
+  double-influenced item. Disjoint **bands** are still detected statically, by exact dict equality
+  against the partner's `all` condition — only two rules in the ruleset have a `none:` block and both
+  pair correctly, so there is no false-positive surface.
+
+Note that **a veto can never carry evidence**: `assess` returns before scoring, so `rules_hit` never
+contains a veto id and `never_fired` does not even iterate them. The page says "cannot be measured"
+rather than "not measured", because the two vetoes are the only rules whose false-negative cost this
+repo has no instrument for.
 
 ### Blocked on measurement — do not act on these yet
 

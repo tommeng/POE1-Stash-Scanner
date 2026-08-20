@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
 import statistics
 import sys
 import time
@@ -28,8 +29,9 @@ from .config import (
     poesessid_problem,
 )
 from . import ninja
+from .explain import describe, evidence_from
 from .items import CATEGORY_LABELS, classify
-from .report import render
+from .report import render, render_rules
 from .ratelimit import RateLimiter
 from .scanner import open_stash, scan, select_tabs
 from .trade import DEFAULT_STATUS, MIN_CONFIDENT_SAMPLE, STATUS_OPTIONS, TradeClient
@@ -44,10 +46,12 @@ from .tradedata import (
 )
 from .triage import (
     CONDITION_KEYS,
+    CONDITION_SECTIONS,
     DEFAULT_RULES,
     FLAG_NAMES,
     PSEUDO_NAMES,
     Ruleset,
+    RulesetError,
     ambiguous_conditions,
     assess,
 )
@@ -488,7 +492,7 @@ def cmd_validate(args) -> int:
     for section in ("veto", "rules"):
         for rule in data.get(section) or []:
             rid = str(rule.get("id", "?"))
-            for key in ("all", "any", "none"):
+            for key in CONDITION_SECTIONS:
                 for cond in rule.get(key) or []:
                     if not isinstance(cond, dict):
                         continue
@@ -577,6 +581,79 @@ def cmd_validate(args) -> int:
             console.print(f"  [bold]{rid}[/]: [yellow]{ref}[/]\n    {why}")
         return 1
     console.print(f"[green]All {checked} references resolve.[/]")
+    return 0
+
+
+def _rules_evidence(ruleset, league: str):
+    """The measured half of the ruleset page, or None if the cache cannot be read.
+
+    A documentation command must not fail because a database is locked, missing
+    or corrupt: the rules are still worth reading, so this degrades to a page
+    that says no evidence was available.
+    """
+    try:
+        with Cache() as cache:
+            rows = cache.observations(league)
+    except (OSError, sqlite3.Error) as e:
+        console.print(f"[yellow]No evidence available:[/] could not read the cache ({e}).")
+        return None
+    if not rows:
+        console.print(
+            f"[dim]No labelled observations for {league} yet - every rule will read "
+            '"not measured". A normal scan over the same tabs labels cached checks '
+            "for free.[/]"
+        )
+    return evidence_from(rows, ruleset)
+
+
+def cmd_explain_rules(args) -> int:
+    """Render the ruleset itself as a page: what is rewarded, and how much.
+
+    Makes no requests of any kind and never loads the trade stat definitions, so
+    it works on a machine that has never run a scan. It also always exits 0: it
+    is the only tool that renders a dead rule *visibly*, and a non-zero exit
+    would make it unusable in the middle of an edit. `validate-rules` owns the
+    exit code, and the page says so.
+    """
+    path = Path(args.rules) if args.rules else DEFAULT_RULES
+    try:
+        ruleset = Ruleset.load(path)
+    except RulesetError as e:
+        return _err(
+            f"{path} cannot be evaluated as written:\n{e}\n\n"
+            "Run [bold]poescan validate-rules[/] to list every problem at once."
+        )
+    except (OSError, ValueError) as e:
+        return _err(f"Could not read {path}: {e}")
+
+    if not ruleset.rules and not ruleset.veto:
+        return _err(f"{path} defines no rules and no vetoes - there is nothing to document.")
+
+    doc = describe(ruleset)
+    league = ""
+    evidence = None
+    if not args.no_evidence:
+        league = args.league or Config.load().league
+        evidence = _rules_evidence(ruleset, league)
+
+    out = render_rules(doc, evidence=evidence, league=league, out_path=args.out)
+    console.print(f"Ruleset page: [bold]{out}[/]")
+
+    if doc.problems:
+        ids = ", ".join(sorted({rid for rid, _ in doc.problems}))
+        console.print(
+            f"[yellow]{len(doc.problems)} problem(s)[/] on the page, in: [bold]{ids}[/]\n"
+            "A problem means no item can satisfy the condition, so the rule is dead. "
+            "Run [bold]poescan validate-rules[/] for the checks this page does not do."
+        )
+    elif doc.cautions:
+        console.print(
+            f"[dim]{len(doc.cautions)} caution(s) on the page - conditions satisfied "
+            "more widely than they read.[/]"
+        )
+
+    if not args.no_open:
+        webbrowser.open(out.as_uri())
     return 0
 
 
@@ -780,10 +857,15 @@ def _median(values) -> float | None:
 
 
 def _price_cell(med: float | None, baseline: float | None) -> str:
-    """A median, coloured by how it compares with the overall base rate."""
+    """A median, coloured by how it compares with the overall base rate.
+
+    Deliberately not shared with `explain.price_tone`: this emits rich markup for
+    a terminal and that one names a CSS class. Only the threshold is shared, from
+    `calibration.GOOD_MULTIPLE`.
+    """
     if med is None:
         return "[dim]-[/]"
-    if baseline and med >= baseline * 2:
+    if baseline and med >= baseline * calibration.GOOD_MULTIPLE:
         return f"[green]{med:.0f}c[/]"
     if baseline and med <= baseline:
         return f"[red]{med:.0f}c[/]"
@@ -1234,6 +1316,19 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("validate-rules", help="check ruleset mod templates against the trade stats")
     s.add_argument("--rules", help="path to a ruleset YAML")
     s.set_defaults(func=cmd_validate)
+
+    s = sub.add_parser(
+        "explain-rules",
+        help="document the scoring ruleset as an HTML page (makes no requests)",
+    )
+    s.add_argument("--rules", help="path to a ruleset YAML")
+    s.add_argument("--out", help="write the HTML here")
+    s.add_argument("--no-open", action="store_true", help="do not open the page in a browser")
+    s.add_argument("--league", help="league whose observations supply the evidence")
+    s.add_argument(
+        "--no-evidence", action="store_true", help="document the rules only; read no cache"
+    )
+    s.set_defaults(func=cmd_explain_rules)
 
     s = sub.add_parser("categories", help="list category ids usable in rules")
     s.set_defaults(func=cmd_categories)

@@ -35,6 +35,12 @@ from dataclasses import dataclass
 # measured constant, and `analyse --tail` moves it.
 TAIL_THRESHOLD = 50.0
 
+# How far above the baseline a median has to sit before it counts as good news.
+# Lives here rather than in either renderer because `analyse` prints it to a
+# terminal and `explain-rules` writes it into HTML: two media, one threshold, and
+# two copies of it would drift into saying different things about one number.
+GOOD_MULTIPLE = 2.0
+
 # Triage score bands, as (low, high) with an open top. These mirror no rule -
 # they exist to answer "does a higher score mean a better item", which the
 # ruleset claims it does not.
@@ -186,6 +192,30 @@ def never_fired(rows: list[dict], ruleset) -> list[str]:
     """
     seen = {str(rid) for r in rows for rid in (r.get("rules_hit") or [])}
     return [str(r.get("id", "?")) for r in ruleset.rules if str(r.get("id", "?")) not in seen]
+
+
+def co_occurrence(rows: list[dict]) -> list[tuple[str, str, int]]:
+    """Which pairs of rules fired on the same item, commonest pair first.
+
+    Counted from the ``rules_hit`` list every observation already carries, so it
+    is *measured* rather than inferred from the thresholds. Inferring it was
+    tried and abandoned: the obvious static heuristic (same slot, same selector,
+    different ``min``) produced six candidate pairs against this ruleset, four of
+    them wrong, and it still missed the largest real interaction - ``influenced``
+    plus ``double-influenced``, 26 points on any double-influenced item - because
+    those two name different selectors.
+
+    Rules are additive and overlapping, so a pair firing together on a large
+    share of its items is the shape that nested bands had: two rows in the rule
+    table describing one population.
+    """
+    pairs: Counter = Counter()
+    for r in rows:
+        ids = sorted({str(rid) for rid in (r.get("rules_hit") or [])})
+        for i, first in enumerate(ids):
+            for second in ids[i + 1 :]:
+                pairs[(first, second)] += 1
+    return [(a, b, n) for (a, b), n in pairs.most_common()]
 
 
 # -- ruleset vocabulary -----------------------------------------------------
